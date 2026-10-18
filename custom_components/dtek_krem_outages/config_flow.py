@@ -35,25 +35,50 @@ from .const import (
     CONF_GROUP,
     CONF_GROUP_MANUAL,
     CONF_HOUSE,
+    CONF_LANGUAGE,
     CONF_SETTLEMENT,
     CONF_SHOW_POSSIBLE,
     CONF_STREET,
     CONF_UPDATE_INTERVAL,
     CONF_USE_MIRROR,
-    CONF_WARNING_MINUTES,
+    CONF_WARN_END,
+    CONF_WARN_START,
+    DEFAULT_LANGUAGE,
     DEFAULT_OPTIONS,
     DOMAIN,
     GROUPS,
+    LANGUAGES,
     MAX_UPDATE_INTERVAL,
-    MAX_WARNING_MINUTES,
     MIN_UPDATE_INTERVAL,
+    WARNING_CHOICES,
     group_name,
+    warning_thresholds,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 _UK_ALPHABET = "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя"
 _SETTLEMENT_PREFIX = re.compile(r"^(м\.|с\.|смт|с-ще|селище|хут\.|х\.)\s*")
+_STREET_PREFIX = re.compile(
+    r"^(вулиця|вул\.?|провулок|пров\.|проспект|просп\.|бульвар|бульв\.|бул\.|"
+    r"площа|пл\.|узвіз|шосе|туп\.)\s*",
+    re.IGNORECASE,
+)
+
+
+def _normalize(text: str) -> str:
+    """Casefold and collapse the whitespace."""
+    return " ".join(text.split()).casefold()
+
+
+def place_name(settlement: str) -> str:
+    """Return the settlement name without its ``м.``/``с.``/``смт`` prefix."""
+    return _SETTLEMENT_PREFIX.sub("", _normalize(settlement))
+
+
+def _street_name(street: str) -> str:
+    """Return the street name without its ``вул.``/``пров.`` prefix."""
+    return _STREET_PREFIX.sub("", _normalize(street))
 
 
 def _collation_key(text: str) -> tuple[int, ...]:
@@ -81,10 +106,65 @@ def match_choice(value: Any, choices: Iterable[str]) -> str | None:
     """Return the choice equal to ``value``, ignoring case and spaces."""
     if not isinstance(value, str):
         return None
-    wanted = " ".join(value.split()).casefold()
+    wanted = _normalize(value)
     for choice in choices:
-        if " ".join(choice.split()).casefold() == wanted:
+        if _normalize(choice) == wanted:
             return choice
+    return None
+
+
+def match_settlement(value: Any, streets: Mapping[str, list[str]]) -> str | None:
+    """Return the settlement typed in ``value``, with or without its prefix.
+
+    Without the prefix the name can fit several settlements; the one with the
+    most streets wins, the street step lists the streets of the others too.
+    """
+    if (settlement := match_choice(value, streets)) is not None:
+        return settlement
+    if not isinstance(value, str):
+        return None
+    wanted = place_name(value)
+    candidates = [name for name in streets if place_name(name) == wanted]
+    return max(candidates, key=lambda name: len(streets[name]), default=None)
+
+
+def street_choices(
+    streets: Mapping[str, list[str]], settlement: str
+) -> dict[str, tuple[str, str]]:
+    """Return the street options of a settlement as label: (settlement, street).
+
+    DTEK lists some places under several keys, e.g. ``с. Софіївська
+    Борщагівка`` with 151 streets and ``Софіївська Борщагівка`` with just
+    ``Без вулиці``. The streets of the keys with the same name (ignoring the
+    prefix) are offered too, labelled with their settlement.
+    """
+    choices = {street: (settlement, street) for street in streets.get(settlement, [])}
+    name = place_name(settlement)
+    for other, names in streets.items():
+        if other != settlement and place_name(other) == name:
+            for street in names:
+                choices[f"{street} ({other})"] = (other, street)
+    return choices
+
+
+def match_street(value: Any, choices: Mapping[str, tuple[str, str]]) -> str | None:
+    """Return the label of the street typed in ``value``.
+
+    The settlement in brackets and the ``вул.``/``пров.`` prefix may be left
+    out when that leaves one street, looking at the chosen settlement first.
+    """
+    if (label := match_choice(value, choices)) is not None:
+        return label
+    if not isinstance(value, str) or not (wanted := _street_name(value)):
+        return None
+    for key, typed in ((_normalize, _normalize(value)), (_street_name, wanted)):
+        candidates = [
+            label for label, (_, street) in choices.items() if key(street) == typed
+        ]
+        own = [label for label in candidates if choices[label][1] == label]
+        for found in (own, candidates):
+            if len(found) == 1:
+                return found[0]
     return None
 
 
@@ -112,6 +192,40 @@ def _select(options: list[str], *, custom_value: bool = True) -> SelectSelector:
     )
 
 
+def _language_select() -> SelectSelector:
+    """A dropdown of the languages of the entity names."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(value=code, label=label)
+                for code, label in LANGUAGES.items()
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _checked(options: Mapping[str, Any], key: str) -> list[str]:
+    """Return the minutes ticked in a warning option, as selector values."""
+    return [str(minutes) for minutes in warning_thresholds(options, key)]
+
+
+def _warning_select(options: Mapping[str, Any], key: str) -> Any:
+    """Checkboxes of the warning minutes, plus any other minutes already saved."""
+    minutes = sorted({*WARNING_CHOICES, *warning_thresholds(options, key)})
+    return vol.All(
+        SelectSelector(
+            SelectSelectorConfig(
+                options=[str(m) for m in minutes],
+                multiple=True,
+                mode=SelectSelectorMode.LIST,
+                translation_key="warning_minutes",
+            )
+        ),
+        lambda value: sorted({int(m) for m in value}, reverse=True),
+    )
+
+
 def _options_schema(options: Mapping[str, Any]) -> dict[vol.Marker, Any]:
     values = {**DEFAULT_OPTIONS, **options}
     return {
@@ -129,19 +243,11 @@ def _options_schema(options: Mapping[str, Any]) -> dict[vol.Marker, Any]:
             ),
             vol.Coerce(int),
         ),
-        vol.Required(
-            CONF_WARNING_MINUTES, default=values[CONF_WARNING_MINUTES]
-        ): vol.All(
-            NumberSelector(
-                NumberSelectorConfig(
-                    min=0,
-                    max=MAX_WARNING_MINUTES,
-                    step=5,
-                    mode=NumberSelectorMode.BOX,
-                    unit_of_measurement="min",
-                )
-            ),
-            vol.Coerce(int),
+        vol.Required(CONF_WARN_START, default=_checked(options, CONF_WARN_START)): (
+            _warning_select(options, CONF_WARN_START)
+        ),
+        vol.Required(CONF_WARN_END, default=_checked(options, CONF_WARN_END)): (
+            _warning_select(options, CONF_WARN_END)
         ),
         vol.Required(
             CONF_USE_MIRROR, default=values[CONF_USE_MIRROR]
@@ -149,6 +255,9 @@ def _options_schema(options: Mapping[str, Any]) -> dict[vol.Marker, Any]:
         vol.Required(
             CONF_SHOW_POSSIBLE, default=values[CONF_SHOW_POSSIBLE]
         ): BooleanSelector(),
+        vol.Required(CONF_LANGUAGE, default=values[CONF_LANGUAGE]): vol.All(
+            _language_select(), vol.In(LANGUAGES)
+        ),
     }
 
 
@@ -166,6 +275,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
         self._houses: dict[str, House] | None = None
         self._house: str | None = None
         self._name: str | None = None
+        self._language: str = DEFAULT_LANGUAGE
         self._groups: list[str] = []
 
     @staticmethod
@@ -197,7 +307,9 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
             user_input = None
 
         if user_input is not None:
-            settlement = match_choice(user_input.get(CONF_SETTLEMENT), self._streets)
+            settlement = match_settlement(
+                user_input.get(CONF_SETTLEMENT), self._streets
+            )
             if settlement is None:
                 errors[CONF_SETTLEMENT] = "unknown_settlement"
             else:
@@ -224,16 +336,17 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Choose the street."""
-        streets = (self._streets or {}).get(self._settlement or "", [])
+        choices = street_choices(self._streets or {}, self._settlement or "")
         errors: dict[str, str] = {}
         if user_input is not None and CONF_STREET in user_input:
-            street = match_choice(user_input[CONF_STREET], streets)
-            if street is None:
+            label = match_street(user_input[CONF_STREET], choices)
+            if label is None:
                 errors[CONF_STREET] = "unknown_street"
             else:
-                if street != self._street:
+                address = choices[label]
+                if address != (self._settlement, self._street):
                     self._houses = None
-                self._street = street
+                self._settlement, self._street = address
                 return await self.async_step_house()
 
         return self.async_show_form(
@@ -242,7 +355,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_STREET, description={"suggested_value": self._street}
-                    ): _select(sorted(streets, key=_collation_key))
+                    ): _select(sorted(choices, key=_collation_key))
                 }
             ),
             errors=errors,
@@ -288,24 +401,30 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
             else:
                 self._house = house
                 self._name = (user_input.get(CONF_NAME) or "").strip() or None
+                if user_input.get(CONF_LANGUAGE) in LANGUAGES:
+                    self._language = user_input[CONF_LANGUAGE]
                 groups = self._houses[house].groups
                 if len(groups) == 1:
                     return await self._async_finish(groups[0], manual=False)
                 self._groups = groups
                 return await self.async_step_group()
 
+        schema: dict[vol.Marker, Any] = {
+            vol.Required(
+                CONF_HOUSE, description={"suggested_value": self._house}
+            ): _select(sorted(self._houses, key=house_sort_key)),
+            vol.Optional(
+                CONF_NAME, description={"suggested_value": self._name}
+            ): TextSelector(),
+        }
+        if self.source != SOURCE_RECONFIGURE:
+            # Reconfiguring keeps the options; the language is one of them.
+            schema[vol.Required(CONF_LANGUAGE, default=self._language)] = (
+                _language_select()
+            )
         return self.async_show_form(
             step_id="house",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_HOUSE, description={"suggested_value": self._house}
-                    ): _select(sorted(self._houses, key=house_sort_key)),
-                    vol.Optional(
-                        CONF_NAME, description={"suggested_value": self._name}
-                    ): TextSelector(),
-                }
-            ),
+            data_schema=vol.Schema(schema),
             errors=errors,
             description_placeholders=self._placeholders(),
         )
@@ -365,7 +484,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
             return self.async_create_entry(
                 title=self._name or auto_title,
                 data=data,
-                options=dict(DEFAULT_OPTIONS),
+                options={**DEFAULT_OPTIONS, CONF_LANGUAGE: self._language},
             )
 
         entry = self._get_reconfigure_entry()

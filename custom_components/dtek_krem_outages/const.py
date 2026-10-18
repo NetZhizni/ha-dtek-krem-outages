@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Final
+from collections.abc import Mapping
+from typing import Any, Final
 
 DOMAIN: Final = "dtek_krem_outages"
 NAME: Final = "DTEK KREM Outages"
@@ -53,23 +54,41 @@ CONF_GROUP: Final = "group"
 # True when the user picked the group because the address had none or several.
 CONF_GROUP_MANUAL: Final = "group_manual"
 CONF_UPDATE_INTERVAL: Final = "update_interval"
+# Minutes before an outage starts / ends to send a warning; both are lists.
+CONF_WARN_START: Final = "warn_before_start"
+CONF_WARN_END: Final = "warn_before_end"
+# Single number kept by entries created before the two lists above.
 CONF_WARNING_MINUTES: Final = "warning_minutes"
 CONF_USE_MIRROR: Final = "use_mirror"
 CONF_SHOW_POSSIBLE: Final = "show_possible"
+# Language of the entity names and calendar texts, independent of the language
+# of Home Assistant: it is often left English while people use Ukrainian.
+CONF_LANGUAGE: Final = "language"
 
 DEFAULT_UPDATE_INTERVAL: Final = 5
 MIN_UPDATE_INTERVAL: Final = 2
 MAX_UPDATE_INTERVAL: Final = 60
-DEFAULT_WARNING_MINUTES: Final = 30
-MAX_WARNING_MINUTES: Final = 240
+DEFAULT_WARN_START: Final[tuple[int, ...]] = (30,)
+DEFAULT_WARN_END: Final[tuple[int, ...]] = ()
+# Minutes offered as checkboxes in the options.
+WARNING_CHOICES: Final[tuple[int, ...]] = (1, 5, 10, 15, 30, 60, 120)
 DEFAULT_USE_MIRROR: Final = True
 DEFAULT_SHOW_POSSIBLE: Final = True
+# Language code: name shown in the selector.
+LANGUAGES: Final[dict[str, str]] = {
+    "uk": "Українська",
+    "en": "English",
+    "ru": "Русский",
+}
+DEFAULT_LANGUAGE: Final = "uk"
 
 DEFAULT_OPTIONS: Final[dict[str, object]] = {
     CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
-    CONF_WARNING_MINUTES: DEFAULT_WARNING_MINUTES,
+    CONF_WARN_START: list(DEFAULT_WARN_START),
+    CONF_WARN_END: list(DEFAULT_WARN_END),
     CONF_USE_MIRROR: DEFAULT_USE_MIRROR,
     CONF_SHOW_POSSIBLE: DEFAULT_SHOW_POSSIBLE,
+    CONF_LANGUAGE: DEFAULT_LANGUAGE,
 }
 
 # Every event goes to the bus as EVENT_BUS with ``type`` set to one of these,
@@ -78,6 +97,7 @@ EVENT_BUS: Final = f"{DOMAIN}_event"
 EVENT_SCHEDULE_PUBLISHED: Final = "schedule_published"
 EVENT_SCHEDULE_CHANGED: Final = "schedule_changed"
 EVENT_OUTAGE_WARNING: Final = "outage_warning"
+EVENT_OUTAGE_END_WARNING: Final = "outage_end_warning"
 EVENT_OUTAGE_STARTED: Final = "outage_started"
 EVENT_OUTAGE_ENDED: Final = "outage_ended"
 EVENT_ADDRESS_OUTAGE: Final = "address_outage"
@@ -86,6 +106,7 @@ EVENT_TYPES: Final = (
     EVENT_SCHEDULE_PUBLISHED,
     EVENT_SCHEDULE_CHANGED,
     EVENT_OUTAGE_WARNING,
+    EVENT_OUTAGE_END_WARNING,
     EVENT_OUTAGE_STARTED,
     EVENT_OUTAGE_ENDED,
     EVENT_ADDRESS_OUTAGE,
@@ -126,6 +147,12 @@ CALENDAR_TEXT: Final[dict[str, dict[str, str]]] = {
         "group": "Черга",
         "weekly": "Тижневий графік можливих відключень",
     },
+    "ru": {
+        "outage": "Отключение света",
+        "possible": "Возможное отключение",
+        "group": "Очередь",
+        "weekly": "Недельный график возможных отключений",
+    },
 }
 
 
@@ -144,3 +171,19 @@ def signal_event(entry_id: str) -> str:
 def storage_key(entry_id: str) -> str:
     """Return the Store key holding the schedule state of an entry."""
     return f"{DOMAIN}.{entry_id}"
+
+
+def warning_thresholds(options: Mapping[str, Any], key: str) -> tuple[int, ...]:
+    """Return the warning minutes of an option, largest first.
+
+    Entries saved before the lists existed hold one number in
+    ``warning_minutes``, which stands for the "before start" list.
+    """
+    value = options.get(key)
+    if value is None:
+        legacy = options.get(CONF_WARNING_MINUTES) if key == CONF_WARN_START else None
+        if legacy is not None:
+            value = [legacy]
+        else:
+            value = DEFAULT_WARN_START if key == CONF_WARN_START else DEFAULT_WARN_END
+    return tuple(sorted({int(m) for m in value if int(m) > 0}, reverse=True))

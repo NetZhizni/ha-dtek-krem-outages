@@ -26,6 +26,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.translation import async_get_translations
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -42,20 +43,23 @@ from .const import (
     CONF_GROUP,
     CONF_GROUP_MANUAL,
     CONF_HOUSE,
+    CONF_LANGUAGE,
     CONF_SETTLEMENT,
     CONF_SHOW_POSSIBLE,
     CONF_STREET,
     CONF_UPDATE_INTERVAL,
     CONF_USE_MIRROR,
-    CONF_WARNING_MINUTES,
+    CONF_WARN_END,
+    CONF_WARN_START,
+    DEFAULT_LANGUAGE,
     DEFAULT_SHOW_POSSIBLE,
     DEFAULT_UPDATE_INTERVAL,
     DEFAULT_USE_MIRROR,
-    DEFAULT_WARNING_MINUTES,
     DOMAIN,
     EVENT_ADDRESS_OUTAGE,
     EVENT_BUS,
     EVENT_GROUP_CHANGED,
+    EVENT_OUTAGE_END_WARNING,
     EVENT_OUTAGE_ENDED,
     EVENT_OUTAGE_STARTED,
     EVENT_OUTAGE_WARNING,
@@ -63,6 +67,7 @@ from .const import (
     EVENT_SCHEDULE_PUBLISHED,
     FORCE_UPDATE_FACT,
     HISTORY_DAYS,
+    LANGUAGES,
     MIN_UPDATE_INTERVAL,
     SOURCE_DTEK,
     SOURCE_MIRROR,
@@ -72,6 +77,7 @@ from .const import (
     group_name,
     signal_event,
     storage_key,
+    warning_thresholds,
 )
 from .schedule import (
     SLOT_MAYBE,
@@ -175,13 +181,21 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self.house: str = entry.data[CONF_HOUSE]
         self.group: str = entry.data[CONF_GROUP]
         self.group_manual: bool = bool(entry.data.get(CONF_GROUP_MANUAL, False))
-        self.warning = timedelta(
-            minutes=int(options.get(CONF_WARNING_MINUTES, DEFAULT_WARNING_MINUTES))
+        self.warn_start = tuple(
+            timedelta(minutes=m) for m in warning_thresholds(options, CONF_WARN_START)
+        )
+        self.warn_end = tuple(
+            timedelta(minutes=m) for m in warning_thresholds(options, CONF_WARN_END)
         )
         self.use_mirror = bool(options.get(CONF_USE_MIRROR, DEFAULT_USE_MIRROR))
         self.show_possible = bool(
             options.get(CONF_SHOW_POSSIBLE, DEFAULT_SHOW_POSSIBLE)
         )
+        language = options.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        self.language: str = language if language in LANGUAGES else DEFAULT_LANGUAGE
+        # Entity translations in self.language, keyed like
+        # ``component.<domain>.entity.sensor.group.name``.
+        self.translations: dict[str, str] = {}
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, storage_key(entry.entry_id)
         )
@@ -439,8 +453,11 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         oldest = today - timedelta(days=HISTORY_DAYS)
         self._days = {day: s for day, s in self._days.items() if day >= oldest}
         cutoff = now - timedelta(days=1)
+        # Keys are ``<kind>@<minutes>@<moment>``; older ones are the bare moment.
         self._warned = {
-            w for w in self._warned if (start := _parse_iso(w)) and start > cutoff
+            w
+            for w in self._warned
+            if (moment := _parse_iso(w.rsplit("@", 1)[-1])) and moment > cutoff
         }
 
     def _snapshot(self) -> DtekData:
@@ -493,23 +510,60 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._outage_now = current
         self._outage_known = True
 
-        if self.warning <= timedelta(0):
-            return
         for outage in outages:
-            if outage.start <= now or outage.start - self.warning > now:
-                continue
-            key = outage.start.isoformat()  # UTC, stable across restarts
-            if key in self._warned:
-                continue
-            self._warned.add(key)
-            self._store.async_delay_save(self._store_data, STORAGE_SAVE_DELAY)
-            self._queue(
-                EVENT_OUTAGE_WARNING,
-                {
-                    **self._interval_data(outage),
-                    "minutes": math.ceil((outage.start - now).total_seconds() / 60),
-                },
-            )
+            if outage.start > now:
+                self._warn(
+                    now,
+                    outage,
+                    "start",
+                    outage.start,
+                    thresholds=self.warn_start,
+                    event_type=EVENT_OUTAGE_WARNING,
+                )
+            elif outage.start <= now < outage.end:
+                # A threshold at least as long as the outage would fire the
+                # "ending" warning together with the start.
+                ends = tuple(t for t in self.warn_end if outage.end - t > outage.start)
+                self._warn(
+                    now,
+                    outage,
+                    "end",
+                    outage.end,
+                    thresholds=ends,
+                    event_type=EVENT_OUTAGE_END_WARNING,
+                )
+
+    def _warn(
+        self,
+        now: datetime,
+        outage: Interval,
+        kind: str,
+        moment: datetime,
+        *,
+        thresholds: tuple[timedelta, ...],
+        event_type: str,
+    ) -> None:
+        """Queue one warning for the thresholds of ``moment`` that are now due.
+
+        Several due thresholds (a new outage that starts sooner than all of
+        them) give a single event and are all marked as sent.
+        """
+        due = [t for t in thresholds if moment - t <= now]
+        keys = {
+            f"{kind}@{int(t.total_seconds() // 60)}@{moment.isoformat()}"  # UTC
+            for t in due
+        }
+        if not keys or keys <= self._warned:
+            return
+        self._warned |= keys
+        self._store.async_delay_save(self._store_data, STORAGE_SAVE_DELAY)
+        self._queue(
+            event_type,
+            {
+                **self._interval_data(outage),
+                "minutes": math.ceil((moment - now).total_seconds() / 60),
+            },
+        )
 
     @callback
     def _schedule_timer(self, now: datetime) -> None:
@@ -518,8 +572,10 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         moments: list[datetime] = []
         for outage in intervals(self._days, self.tz):
             moments.extend((outage.start, outage.end))
-            if self.warning > timedelta(0):
-                moments.append(outage.start - self.warning)
+            moments.extend(outage.start - t for t in self.warn_start)
+            moments.extend(
+                outage.end - t for t in self.warn_end if outage.end - t > outage.start
+            )
         if (address := self._address_outage) is not None:
             moments.extend(m for m in (address.start, address.end) if m is not None)
         today, _ = slot_at(now, self.tz)
@@ -543,6 +599,12 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         if self._unsub_timer is not None:
             self._unsub_timer()
             self._unsub_timer = None
+
+    async def async_load_translations(self) -> None:
+        """Load the entity names in the language chosen for the entry."""
+        self.translations = await async_get_translations(
+            self.hass, self.language, "entity", {DOMAIN}
+        )
 
     async def async_shutdown(self) -> None:
         """Cancel the timer, write the state now and stop polling.

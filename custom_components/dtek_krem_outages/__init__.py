@@ -31,6 +31,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: DtekConfigEntry) -> bool:
     """Set up DTEK KREM Outages from a config entry."""
     coordinator = DtekCoordinator(hass, entry, await async_get_client(hass))
+    await coordinator.async_load_translations()
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
 

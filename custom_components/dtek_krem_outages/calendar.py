@@ -44,8 +44,7 @@ class OutageCalendar(DtekEntity, CalendarEntity):
         super().__init__(coordinator, "outages")
 
     def _text(self) -> dict[str, str]:
-        language = self.hass.config.language.split("-")[0]
-        return CALENDAR_TEXT.get(language, CALENDAR_TEXT["en"])
+        return CALENDAR_TEXT.get(self.coordinator.language, CALENDAR_TEXT["en"])
 
     def _events(self) -> list[CalendarEvent]:
         coordinator = self.coordinator

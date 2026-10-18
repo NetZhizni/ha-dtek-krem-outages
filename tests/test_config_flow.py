@@ -12,18 +12,23 @@ from custom_components.dtek_krem_outages.config_flow import (
     build_title,
     house_sort_key,
     match_choice,
+    match_settlement,
+    match_street,
     settlement_sort_key,
+    street_choices,
 )
 from custom_components.dtek_krem_outages.const import (
     CONF_GROUP,
     CONF_GROUP_MANUAL,
     CONF_HOUSE,
+    CONF_LANGUAGE,
     CONF_SETTLEMENT,
     CONF_SHOW_POSSIBLE,
     CONF_STREET,
     CONF_UPDATE_INTERVAL,
     CONF_USE_MIRROR,
-    CONF_WARNING_MINUTES,
+    CONF_WARN_END,
+    CONF_WARN_START,
     DEFAULT_OPTIONS,
     DOMAIN,
 )
@@ -47,6 +52,11 @@ async def submit(hass: HomeAssistant, result: dict[str, Any], data: dict) -> dic
     result = await hass.config_entries.flow.async_configure(result["flow_id"], data)
     await hass.async_block_till_done()
     return result
+
+
+def fields_of(result: dict[str, Any]) -> list[str]:
+    """Return the field names of a form."""
+    return [str(marker) for marker in result["data_schema"].schema]
 
 
 def options_of(result: dict[str, Any], key: str) -> list[Any]:
@@ -75,6 +85,58 @@ def test_helpers() -> None:
     assert build_title("с. Буча", "Без вулиці", "5") == "с. Буча, 5"
 
 
+def test_other_spellings() -> None:
+    """Settlements with the same name share their streets."""
+    streets = {
+        "с. Софіївська Борщагівка": ["вул. Миру", "пров. Миру", "вул. Сонячна"],
+        "Софіївська Борщагівка": ["Без вулиці", "вул. Сонячна"],
+        "с. Петропавлівська Борщагівка": ["вул. Миру"],
+    }
+    assert match_settlement("Софіївська Борщагівка", streets) == (
+        "Софіївська Борщагівка"
+    )
+    assert match_settlement(" софіївська  борщагівка", streets) == (
+        "Софіївська Борщагівка"
+    )
+    assert match_settlement("смт Софіївська Борщагівка", streets) == (
+        "с. Софіївська Борщагівка"
+    )
+    assert match_settlement("Київ", streets) is None
+    assert match_settlement(None, streets) is None
+
+    choices = street_choices(streets, "Софіївська Борщагівка")
+    assert choices == {
+        "Без вулиці": ("Софіївська Борщагівка", "Без вулиці"),
+        "вул. Сонячна": ("Софіївська Борщагівка", "вул. Сонячна"),
+        "вул. Миру (с. Софіївська Борщагівка)": (
+            "с. Софіївська Борщагівка",
+            "вул. Миру",
+        ),
+        "пров. Миру (с. Софіївська Борщагівка)": (
+            "с. Софіївська Борщагівка",
+            "пров. Миру",
+        ),
+        "вул. Сонячна (с. Софіївська Борщагівка)": (
+            "с. Софіївська Борщагівка",
+            "вул. Сонячна",
+        ),
+    }
+    assert street_choices(streets, "м. Київ") == {}
+    # The own street wins over the one of another spelling.
+    assert match_street("Сонячна", choices) == "вул. Сонячна"
+    assert match_street("вулиця сонячна", choices) == "вул. Сонячна"
+    # Two streets of another spelling fit: ambiguous.
+    assert match_street("миру", choices) is None
+    assert match_street("пров. миру", choices) == (
+        "пров. Миру (с. Софіївська Борщагівка)"
+    )
+    own = street_choices(streets, "с. Софіївська Борщагівка")
+    assert match_street("без вулиці", own) == "Без вулиці (Софіївська Борщагівка)"
+    assert match_street("вул.", own) is None
+    assert match_street("Нова", own) is None
+    assert match_street(None, own) is None
+
+
 async def test_full_flow(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:
     """Settlement, street and a house with one group create the entry."""
     result = await start(hass)
@@ -89,6 +151,11 @@ async def test_full_flow(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:
     result = await submit(hass, result, {CONF_STREET: STREET})
     assert result["step_id"] == "house"
     assert options_of(result, CONF_HOUSE) == ["2", "8 а", "10", "43"]
+    assert [o["value"] for o in options_of(result, CONF_LANGUAGE)] == [
+        "uk",
+        "en",
+        "ru",
+    ]
 
     result = await submit(hass, result, {CONF_HOUSE: HOUSE})
     assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -101,7 +168,50 @@ async def test_full_flow(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:
         CONF_GROUP_MANUAL: False,
     }
     assert result["options"] == DEFAULT_OPTIONS
+    assert result["options"][CONF_LANGUAGE] == "uk"
     assert result["result"].unique_id == f"{SETTLEMENT}|{STREET}|{HOUSE}"
+
+
+async def test_language_on_creation(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:
+    """The language chosen with the house goes to the options."""
+    result = await start(hass)
+    result = await submit(hass, result, {CONF_SETTLEMENT: SETTLEMENT})
+    result = await submit(hass, result, {CONF_STREET: STREET})
+    result = await submit(hass, result, {CONF_HOUSE: HOUSE, CONF_LANGUAGE: "en"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"] == {**DEFAULT_OPTIONS, CONF_LANGUAGE: "en"}
+
+
+async def test_street_of_other_spelling(
+    hass: HomeAssistant, fake_dtek: FakeDtek
+) -> None:
+    """A street listed under another spelling keeps the settlement that has it."""
+    fake_dtek.streets = {
+        "с. Софіївська Борщагівка": ["вул. Миру", "вул. Жулянська"],
+        "Софіївська Борщагівка": ["Без вулиці"],
+    }
+    result = await start(hass)
+    assert options_of(result, CONF_SETTLEMENT) == [
+        "Софіївська Борщагівка",
+        "с. Софіївська Борщагівка",
+    ]
+    result = await submit(hass, result, {CONF_SETTLEMENT: "Софіївська Борщагівка"})
+    assert result["step_id"] == "street"
+    assert options_of(result, CONF_STREET) == [
+        "Без вулиці",
+        "вул. Жулянська (с. Софіївська Борщагівка)",
+        "вул. Миру (с. Софіївська Борщагівка)",
+    ]
+    result = await submit(hass, result, {CONF_STREET: "миру"})
+    assert result["step_id"] == "house"
+    assert result["description_placeholders"]["settlement"] == (
+        "с. Софіївська Борщагівка"
+    )
+    result = await submit(hass, result, {CONF_HOUSE: HOUSE})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == f"с. Софіївська Борщагівка, вул. Миру, {HOUSE}"
+    assert result["data"][CONF_SETTLEMENT] == "с. Софіївська Борщагівка"
+    assert result["data"][CONF_STREET] == "вул. Миру"
 
 
 async def test_house_with_several_groups(
@@ -207,24 +317,30 @@ async def test_options_flow_reloads(
         result["flow_id"],
         {
             CONF_UPDATE_INTERVAL: 10,
-            CONF_WARNING_MINUTES: 60,
+            CONF_WARN_START: ["60", "5"],
+            CONF_WARN_END: ["30"],
             CONF_USE_MIRROR: False,
             CONF_SHOW_POSSIBLE: False,
+            CONF_LANGUAGE: "en",
         },
     )
     await hass.async_block_till_done()
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert mock_config_entry.options == {
         CONF_UPDATE_INTERVAL: 10,
-        CONF_WARNING_MINUTES: 60,
+        CONF_WARN_START: [60, 5],
+        CONF_WARN_END: [30],
         CONF_USE_MIRROR: False,
         CONF_SHOW_POSSIBLE: False,
+        CONF_LANGUAGE: "en",
     }
     coordinator = mock_config_entry.runtime_data
     assert coordinator is not old_coordinator
     assert coordinator.update_interval == timedelta(minutes=10)
-    assert coordinator.warning == timedelta(minutes=60)
+    assert coordinator.warn_start == (timedelta(minutes=60), timedelta(minutes=5))
+    assert coordinator.warn_end == (timedelta(minutes=30),)
     assert not coordinator.use_mirror
+    assert coordinator.language == "en"
 
 
 async def test_reconfigure(
@@ -236,6 +352,8 @@ async def test_reconfigure(
     assert result["step_id"] == "user"
     result = await submit(hass, result, {CONF_SETTLEMENT: SETTLEMENT})
     result = await submit(hass, result, {CONF_STREET: STREET})
+    # The language is an option; reconfiguring changes only the address.
+    assert CONF_LANGUAGE not in fields_of(result)
     result = await submit(hass, result, {CONF_HOUSE: "2"})
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"

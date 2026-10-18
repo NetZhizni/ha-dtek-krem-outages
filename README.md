@@ -21,7 +21,7 @@ The schedule changes often, sometimes several times a day. So the integration:
 - **keeps the current state** in Home Assistant storage: the schedule by day, its DTEK version, the weekly schedule of possible outages and the outage reported for the address. A restart, or both data sources being down (common during blackouts), doesn't lose the schedule; entities keep working on what is stored;
 - **applies a new version only to the future**: half-hours that already passed keep what was in effect, the current and later half-hours take the new values. Days DTEK doesn't list (tomorrow before it is published) are kept;
 - **announces changes**: `schedule_published` (a new day appeared, usually tomorrow) and `schedule_changed` (the rest of a day changed), with the new and the previous outages;
-- **warns before outages**: `outage_warning` N minutes before a scheduled outage, `outage_started` and `outage_ended` at the exact times, without waiting for the next poll.
+- **warns before outages**: `outage_warning` before a scheduled outage starts and `outage_end_warning` before it ends (power returns), each at the times you tick (e.g. 30 and 5 minutes); `outage_started` and `outage_ended` at the exact times, without waiting for the next poll.
 
 ## How it gets the data
 
@@ -72,8 +72,8 @@ Restart Home Assistant afterwards. To switch to a release later, `git fetch --ta
 **Settings → Devices & services → Add integration → DTEK KREM Outages**, then:
 
 1. **Settlement**: start typing, e.g. `Бориспіль`. The list is the one DTEK uses (about 1200 settlements).
-2. **Street**: villages without street names have `Без вулиці`.
-3. **House**: as DTEK lists it (`43`, `8 а`, `1/2`, ...). Optionally give the entry a short **Name**, e.g. `Home`: entity IDs are built from it (`sensor.home_next_outage`). The examples below assume that name.
+2. **Street**: villages without street names have `Без вулиці`. DTEK lists some places under several spellings (`с. Софіївська Борщагівка` and `Софіївська Борщагівка`); the streets of all of them are shown, the ones of another spelling with it in brackets, so the settlement you picked does not matter.
+3. **House**: as DTEK lists it (`43`, `8 а`, `1/2`, ...). Optionally give the entry a short **Name**, e.g. `Home`: entity IDs are built from it (`sensor.home_next_outage`). The examples below assume that name. **Language of entity names**: Ukrainian (default), English or Russian, see the options below.
 4. **Group**: asked only when DTEK lists no group or several groups for the house. Otherwise the group is detected, and if DTEK later moves the house to another group the entry follows it (`group_changed` event). A group you chose yourself is never replaced.
 
 Each address can be added once; add several entries for several addresses. **⋮ → Reconfigure** changes the address or group.
@@ -83,9 +83,11 @@ Each address can be added once; add several entries for several addresses. **⋮
 | Option | Default | Description |
 |---|---|---|
 | Update interval | 5 min | Minutes between requests to DTEK, at least 2 |
-| Warning before an outage | 30 min | When `outage_warning` fires; 0 turns warnings off |
+| Warn before an outage starts | 30 min | Checkboxes (1, 5, 10, 15, 30, 60, 120 min): when `outage_warning` fires, one event per ticked time; nothing ticked turns it off |
+| Warn before an outage ends (power returns) | none | The same for `outage_end_warning` |
 | Use the backup source | on | Take the schedule from the mirror when DTEK can't be reached |
 | Show possible outages in the calendar | on | Fill the next 7 days without an actual schedule with the weekly schedule of possible outages |
+| Language of entity names | Українська | Language of the entity names and calendar events (Ukrainian, English or Russian), whatever the language of Home Assistant. Entity IDs stay in English |
 
 The entry reloads by itself after saving.
 
@@ -102,8 +104,8 @@ Each entry creates one device:
 | `sensor.…_outages_tomorrow` | The same for tomorrow; `unknown` until DTEK publishes it |
 | `sensor.…_schedule_updated` | When DTEK last changed the schedule. Attributes: `version`, `source` (`dtek` / `mirror` / `storage`) |
 | `sensor.…_last_update` | Last time a source answered (diagnostic). Attribute: `last_error` |
-| `binary_sensor.…_scheduled_outage` | `on` during a scheduled outage. Attributes: `start`, `end`, `next_start`, `next_end` |
-| `binary_sensor.…_address_outage` | `on` while DTEK reports an outage for the house: stabilization, emergency or planned works, with its own start and end. Attributes: `reason`, `kind`, `start`, `end`. `unavailable` when DTEK itself can't be reached |
+| `binary_sensor.…_scheduled_outage` | `on` (shown as *Problem*) during a scheduled outage. Attributes: `start`, `end`, `next_start`, `next_end` |
+| `binary_sensor.…_address_outage` | `on` (shown as *Problem*) while DTEK reports an outage for the house: stabilization, emergency or planned works, with its own start and end. Attributes: `reason`, `kind`, `start`, `end`. `unavailable` when DTEK itself can't be reached |
 | `calendar.…_outages` | Scheduled outages, possible outages and non-stabilization works reported for the address |
 | `event.…_outage_events` | Every event below (`event_type` is the event type, attributes are its data) |
 
@@ -119,7 +121,8 @@ Every event has `type`, `group` (`GPV3.1`), `group_name` (`3.1`), `settlement`, 
 |---|---|---|
 | `schedule_published` | A day got its schedule for the first time (usually tomorrow, in the evening) | `date`, `day` (`today` / `tomorrow` / `other`), `outages` (`[{start, end}]`), `outages_text`, `outage_minutes`, `possible`, `schedule`, `schedule_updated`, `source` |
 | `schedule_changed` | The schedule of a day changed from now on | the same, plus `previous_outages`, `previous_outages_text`, `previous_outage_minutes` |
-| `outage_warning` | N minutes before a scheduled outage, or at once if a new outage starts sooner | `start`, `end`, `duration_minutes`, `minutes` (left) |
+| `outage_warning` | N minutes before a scheduled outage starts, once for each ticked time, or at once (a single event) if a new outage starts sooner | `start`, `end`, `duration_minutes`, `minutes` (left) |
+| `outage_end_warning` | N minutes before a scheduled outage ends and the power returns, once for each ticked time (not for a time longer than the outage) | `start`, `end`, `duration_minutes`, `minutes` (left) |
 | `outage_started` | A scheduled outage starts | `start`, `end`, `duration_minutes` |
 | `outage_ended` | A scheduled outage ends | `start`, `end`, `duration_minutes`, `next_start`, `next_end` |
 | `address_outage` | DTEK reports an outage for the house, changes its end, or clears it | `status` (`new` / `updated` / `cleared`), `reason`, `kind` (`stabilization` / `emergency` / `planned` / `other`), `start`, `end`, `previous_end` |
@@ -130,7 +133,7 @@ Rules:
 - **First run**: the current state is recorded silently, no schedule events.
 - **Changes in the past only** (DTEK rewrites a finished half-hour) fire nothing.
 - **After a restart**, changes published while Home Assistant was down are announced. Events wait until Home Assistant has started, so automations receive them.
-- `outage_started` / `outage_ended` are not fired for an edge that passed while Home Assistant was down. A warning is not repeated after a restart.
+- `outage_started` / `outage_ended` are not fired for an edge that passed while Home Assistant was down. A warning is not repeated after a restart. When the integration wakes up late, inside several ticked times at once, it sends one event, not one per time.
 
 ## Services
 
@@ -171,6 +174,8 @@ mode: queued
 ```
 
 ### Warning on the phone
+
+Tick the times in the options (e.g. 30 and 5 minutes before the start); `minutes` tells which one fired. Use `type: outage_end_warning` the same way for the power coming back.
 
 ```yaml
 alias: "Outage soon → phone"

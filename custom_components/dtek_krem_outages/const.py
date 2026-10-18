@@ -68,6 +68,10 @@ CONF_LANGUAGE: Final = "language"
 DEFAULT_UPDATE_INTERVAL: Final = 5
 MIN_UPDATE_INTERVAL: Final = 2
 MAX_UPDATE_INTERVAL: Final = 60
+# After failed requests the interval doubles, up to this many minutes (or the
+# configured interval if longer), with some jitter so entries spread out.
+RETRY_MAX_INTERVAL: Final = 15
+RETRY_JITTER: Final = 0.1
 DEFAULT_WARN_START: Final[tuple[int, ...]] = (30,)
 DEFAULT_WARN_END: Final[tuple[int, ...]] = ()
 # Minutes offered as checkboxes in the options.
@@ -118,10 +122,42 @@ OUTAGE_KIND_STABILIZATION: Final = "stabilization"
 OUTAGE_KIND_EMERGENCY: Final = "emergency"
 OUTAGE_KIND_PLANNED: Final = "planned"
 OUTAGE_KIND_OTHER: Final = "other"
+# The outage reported when DTEK lists several for one house.
+OUTAGE_KIND_SEVERITY: Final[dict[str, int]] = {
+    OUTAGE_KIND_EMERGENCY: 3,
+    OUTAGE_KIND_STABILIZATION: 2,
+    OUTAGE_KIND_PLANNED: 1,
+    OUTAGE_KIND_OTHER: 0,
+}
+# State of the address status sensor without an outage.
+ADDRESS_STATUS_NONE: Final = "none"
+ADDRESS_STATUSES: Final = (
+    ADDRESS_STATUS_NONE,
+    OUTAGE_KIND_STABILIZATION,
+    OUTAGE_KIND_EMERGENCY,
+    OUTAGE_KIND_PLANNED,
+    OUTAGE_KIND_OTHER,
+)
+# Entities that need an address; an entry set up by group only has none.
+ADDRESS_ENTITIES: Final = (
+    ("binary_sensor", "address_outage"),
+    ("sensor", "address_status"),
+    ("sensor", "restoration"),
+)
 
 SOURCE_DTEK: Final = "dtek"
 SOURCE_MIRROR: Final = "mirror"
 SOURCE_STORAGE: Final = "storage"
+
+# State of the connection sensor: what answered the last update.
+CONNECTION_OK: Final = "ok"
+CONNECTION_MIRROR: Final = "mirror"
+CONNECTION_OFFLINE: Final = "offline"
+CONNECTION_STATES: Final = (CONNECTION_OK, CONNECTION_MIRROR, CONNECTION_OFFLINE)
+# ``data_status`` attribute: the schedule was confirmed by the last update,
+# or entities work on what was stored before.
+DATA_CURRENT: Final = "current"
+DATA_STALE: Final = "stale"
 
 STORAGE_VERSION: Final = 1
 # The Store is written at most this often for routine updates.

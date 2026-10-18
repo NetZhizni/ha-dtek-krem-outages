@@ -23,9 +23,10 @@ custom_components/dtek_krem_outages/
   api.py             DtekClient (aiohttp, CSRF Yii2, getStreets/getHomeNum, дзеркало), Fact/Preset/House/AddressOutage
   schedule.py        чиста логіка: 48 півгодинних слотів на день, інтервали, злиття, виявлення змін
   coordinator.py     DataUpdateCoordinator: ДТЕК → дзеркало, злиття зі Store, події, таймери
-  config_flow.py     user (нас. пункт) → street → house → group; reconfigure; OptionsFlowWithReload
+  config_flow.py     user (нас. пункт) → street → house → group; unreachable → group_only; reconfigure; OptionsFlowWithReload
   entity.py          базовий DtekEntity
-  sensor.py          група, наступне відключення, кінець поточного, години сьогодні/завтра, оновлення
+  sensor.py          група, наступне відключення, кінець поточного, години сьогодні/завтра, оновлення,
+                     стан адреси, орієнтовне відновлення, зв'язок з ДТЕК
   binary_sensor.py   відключення за графіком, відключення за адресою
   calendar.py        фактичні, можливі (тижневий графік) і адресні відключення
   event.py           event-сутність з усіма типами подій
@@ -49,6 +50,9 @@ tests/               pytest + pytest-homeassistant-custom-component; FakeDtek у
 - **Джерела.** Основне — ДТЕК; дзеркало `Baskerville42/outage-data-ua` — лише коли ДТЕК не відповів і лише якщо його версія новіша.
 - **Події.** Одна подія на шині `dtek_krem_outages_event` з полем `type` + event-сутність (dispatcher). Перший запуск мовчить. Події відкладаються до `homeassistant_started`. Таймер координатора прокидається на межах відключень, за `warning_minutes` до них, на межах адресного відключення й опівночі.
 - **Черга.** Якщо ДТЕК вказує для будинку рівно одну іншу чергу і `group_manual` = False, запис переходить на неї (`group_changed`, `async_update_entry`).
+- **Прапорці сторінки** (`Publication`, у Store). `showTablePlan: false` — календар не показує тижневий графік. `showTableFact`/`showTableSchedule: false` — дні від поточного слота очищаються (`_hide_daily`, подія `schedule_changed`), дзеркальний `fact` не береться; коли таблиця повертається, графік запитується з `FORCE_UPDATE_FACT`. `showCurOutageParam: false` — відключення будинку ігнорується. Будинок у `getHomeNum` може бути списком записів: черги об'єднуються, відключення — найсерйозніше (`OUTAGE_KIND_SEVERITY`); `cek` → `external_operator`.
+- **Запис без адреси.** Якщо `getStreets` падає, config flow показує меню `unreachable` → `group_only`: у `entry.data` лише `group`, `group_manual`; `has_address` = False, джерело — тільки дзеркало, адресні сутності (`ADDRESS_ENTITIES`) не створюються й прибираються з реєстру.
+- **Зв'язок.** `connection` (`ok`/`mirror`/`offline`) і `data_status` (`current`/`stale`). Після збою основного джерела `update_interval` подвоюється до `RETRY_MAX_INTERVAL` з розкидом `RETRY_JITTER`.
 - **Атрибуція.** Кожна сутність має `Data provided by DTEK Kyiv Regional Electric Networks` — не прибирати.
 
 ## Команди
@@ -67,7 +71,7 @@ CI використовує Python 3.14; `ruff` налаштований на `p
 - Код, коментарі, докстрінги та логи — англійською. Докстрінги у стилі Google (ruff `D`), рядок 88, `from __future__ import annotations` у кожному модулі.
 - Константи тільки в `const.py` з `Final`.
 - Тексти UI: `strings.json` і `translations/en.json` мають бути ідентичними; `translations/uk.json` і `translations/ru.json` оновлювати разом з ними (це перевіряє `tests/test_manifest.py`). Помилки — через `translation_key`. Тексти календаря — `CALENDAR_TEXT` у `const.py` за мовою з опції `language` (`LANGUAGES`).
-- README розділений за мовами: `README.md` — англійська (за замовчуванням, її показує HACS), `doc/README_uk.md` — українська. Обидва повні, з однаковою структурою й прикладами YAML; зміни поведінки відображати в обох. Посилання на українську версію в `README.md` — абсолютне (GitHub URL), бо HACS не розв'язує відносні шляхи.
+- README розділений за мовами: `README.md` — українська (за замовчуванням, її показує HACS), `doc/README_en.md` — англійська. Обидва повні, з однаковою структурою й прикладами YAML; зміни поведінки відображати в обох. Посилання на англійську версію в `README.md` — абсолютне (GitHub URL), бо HACS не розв'язує відносні шляхи. Розділ «Порівняння з іншими інтеграціями» описує groove-max/ha-dtek-monitor і aavdberg/ha-dtek станом на вказану дату; оновлювати дату, коли змінюєш порівняння.
 - Нова функціональність — з тестами в `tests/`. Запити до ДТЕК у тестах ідуть через `FakeDtek` (перевіряє справжній CSRF і семантику `updateFact`).
 
 ## Релізи

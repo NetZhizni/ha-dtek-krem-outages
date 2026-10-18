@@ -7,6 +7,7 @@ from typing import Any
 
 import aiohttp
 from freezegun.api import FrozenDateTimeFactory
+import pytest
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_capture_events,
@@ -16,6 +17,8 @@ from pytest_homeassistant_custom_component.common import (
 from custom_components.dtek_krem_outages.const import (
     CONF_GROUP,
     CONF_USE_MIRROR,
+    DEFAULT_OPTIONS,
+    DOMAIN,
     EVENT_BUS,
     FORCE_UPDATE_FACT,
     SOURCE_DTEK,
@@ -26,6 +29,7 @@ from custom_components.dtek_krem_outages.const import (
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, STATE_UNAVAILABLE
 from homeassistant.core import CoreState, Event, HomeAssistant
+from homeassistant.helpers import entity_registry as er
 
 from .conftest import (
     ENTRY_ID,
@@ -527,3 +531,188 @@ async def test_remove_entry_deletes_store(
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
     assert STORE_KEY not in hass_storage
+
+
+async def test_daily_schedule_hidden_and_shown_again(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+) -> None:
+    """While DTEK hides the schedule the future is cleared, then restored."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    fake_dtek.flags["showTableFact"] = False
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.days[TODAY] == slots()
+    assert data.publication.daily_hidden
+    assert stored(hass_storage)["publication"]["daily"] is False
+    changed = bus_events(events, "schedule_changed")
+    assert [e["outages_text"] for e in changed] == [""]
+    assert changed[0]["previous_outages_text"] == "12:00–14:00, 18:00–20:30"
+
+    # The mirror still has the schedule; it is not used while DTEK hides it.
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+    fake_dtek.mirror_days = {TODAY: {GROUP: slots(("12:00", "15:00"))}}
+    fake_dtek.mirror_update = "18.10.2026 10:00"
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.days[TODAY] == slots()
+
+    # Shown again: the whole schedule is asked for, though its version is known.
+    fake_dtek.ajax_error = None
+    fake_dtek.flags["showTableFact"] = True
+    await refresh(hass, mock_config_entry)
+    assert fake_dtek.schedule_forms[-1]["data[2][value]"] == FORCE_UPDATE_FACT
+    assert mock_config_entry.runtime_data.data.days[TODAY] == slots(
+        ("12:00", "14:00"), ("18:00", "20:30")
+    )
+    assert [e["outages_text"] for e in bus_events(events, "schedule_changed")] == [
+        "",
+        "12:00–14:00, 18:00–20:30",
+    ]
+
+
+async def test_hidden_from_the_start(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A schedule block hidden at the first update gives no schedule, no events."""
+    fake_dtek.flags["showTableSchedule"] = False
+    events = async_capture_events(hass, EVENT_BUS)
+    await setup_entry(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.days == {}
+    assert data.fact_update == "18.10.2026 09:00"
+    assert bus_events(events) == []
+
+
+async def test_current_outage_hidden(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """``showCurOutageParam: false`` leaves the outage of the house out."""
+    fake_dtek.flags["showCurOutageParam"] = False
+    fake_dtek.houses[HOUSE] = make_house(
+        reason="Аварійні ремонтні роботи",
+        start="09:50 18.10.2026",
+        end="13:00 18.10.2026",
+    )
+    await setup_entry(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.address_outage is None
+
+
+async def test_house_with_several_records(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A house listed with one record per outage is still found."""
+    fake_dtek.houses[HOUSE] = [
+        make_house(reason="Планові ремонтні роботи", start="09:00 18.10.2026"),
+        make_house(reason="Аварійні ремонтні роботи", start="10:00 18.10.2026"),
+    ]
+    await setup_entry(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.groups_at_address == [GROUP]
+    assert data.address_outage.kind == "emergency"
+
+
+async def test_external_operator(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    caplog: Any,
+) -> None:
+    """A house of another operator is flagged and logged once."""
+    fake_dtek.houses[HOUSE] = {**make_house(), "cek": True}
+    await setup_entry(hass, mock_config_entry)
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.external_operator
+    assert caplog.text.count("served by another operator") == 1
+    group = hass.states.get(get_entity_id(hass, "sensor", "group"))
+    assert group.attributes["external_operator"] is True
+
+
+async def test_retry_backoff(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Failed updates stretch the interval up to 15 minutes; success resets it."""
+    await setup_entry(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data
+    assert coordinator.update_interval == timedelta(minutes=5)
+
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+    for minutes in (5, 10, 15, 15):
+        await refresh(hass, mock_config_entry)
+        seconds = coordinator.update_interval.total_seconds()
+        assert minutes * 60 * 0.9 <= seconds <= minutes * 60 * 1.1
+    assert coordinator.data.consecutive_failures == 4
+    assert coordinator.data.connection == "mirror"
+
+    fake_dtek.ajax_error = None
+    await refresh(hass, mock_config_entry)
+    assert coordinator.update_interval == timedelta(minutes=5)
+    assert coordinator.data.consecutive_failures == 0
+    assert coordinator.data.connection == "ok"
+
+
+async def test_blocked_by_challenge(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The anti-bot page is told apart from other errors."""
+    await setup_entry(hass, mock_config_entry)
+    fake_dtek.ajax_text = "<html><script src='/_Incapsula_Resource?x'></script>"
+    fake_dtek.mirror_error = aiohttp.ClientConnectionError()
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.blocked
+    assert data.connection == "offline"
+    assert data.data_status == "stale"
+
+
+GROUP_ONLY_DATA = {CONF_GROUP: GROUP, "group_manual": True}
+
+
+@pytest.mark.parametrize("entry_data", [GROUP_ONLY_DATA])
+@pytest.mark.parametrize("options", [{**DEFAULT_OPTIONS, CONF_USE_MIRROR: False}])
+async def test_group_only_entry(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+) -> None:
+    """Without an address the mirror gives the schedule, whatever the option."""
+    registry = er.async_get(hass)
+    mock_config_entry.add_to_hass(hass)
+    # Left from the time the entry had an address.
+    registry.async_get_or_create(
+        "binary_sensor",
+        DOMAIN,
+        f"{ENTRY_ID}_address_outage",
+        config_entry=mock_config_entry,
+    )
+    await setup_entry(hass, mock_config_entry)
+
+    assert fake_dtek.forms == []
+    assert fake_dtek.mirror_requests == 1
+    data = mock_config_entry.runtime_data.data
+    assert data.source == SOURCE_MIRROR
+    assert data.connection == "mirror"
+    assert data.days[TODAY] == slots(("12:00", "14:00"), ("18:00", "20:30"))
+    assert stored(hass_storage)["address"] == ""
+    keys = {
+        entity.unique_id.removeprefix(f"{ENTRY_ID}_")
+        for entity in er.async_entries_for_config_entry(registry, ENTRY_ID)
+    }
+    assert "address_outage" not in keys
+    assert "address_status" not in keys
+    assert {"group", "next_outage", "connection", "outages"} <= keys
+
+
+@pytest.mark.parametrize("entry_data", [GROUP_ONLY_DATA])
+async def test_group_only_without_mirror_retries(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Without the mirror an entry by group has nothing and retries setup."""
+    fake_dtek.mirror_error = aiohttp.ClientConnectionError()
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY

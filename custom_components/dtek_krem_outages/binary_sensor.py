@@ -25,12 +25,10 @@ async def async_setup_entry(
 ) -> None:
     """Set up the binary sensors."""
     coordinator = entry.runtime_data
-    async_add_entities(
-        [
-            ScheduledOutageBinarySensor(coordinator),
-            AddressOutageBinarySensor(coordinator),
-        ]
-    )
+    entities: list[BinarySensorEntity] = [ScheduledOutageBinarySensor(coordinator)]
+    if coordinator.has_address:
+        entities.append(AddressOutageBinarySensor(coordinator))
+    async_add_entities(entities)
 
 
 class ScheduledOutageBinarySensor(DtekEntity, BinarySensorEntity):
@@ -67,6 +65,7 @@ class ScheduledOutageBinarySensor(DtekEntity, BinarySensorEntity):
             "end": current_data.get("end"),
             "next_start": upcoming_data.get("start"),
             "next_end": upcoming_data.get("end"),
+            **self.coordinator.data.freshness(),
         }
 
 

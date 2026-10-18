@@ -3,6 +3,11 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-10-18
+
+### Fixed
+- `Unexpected error while loading the streets` (`RuntimeError: Session is closed`) in the config flow: the shared DTEK client kept using its HTTP session after Home Assistant closed it. The client now creates a new session (and asks for a new CSRF token) when the current one is closed.
+
 ## [0.1.1] - 2026-10-18
 
 ### Added

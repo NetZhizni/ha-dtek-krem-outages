@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, tzinfo
 import logging
@@ -384,15 +384,33 @@ class DtekClient:
         base_url: str = SITE_BASE_URL,
         mirror_url: str = MIRROR_URL,
         user_agent: str | None = None,
+        session_factory: Callable[[], aiohttp.ClientSession] | None = None,
     ) -> None:
-        """Initialize the client."""
+        """Initialize the client.
+
+        ``session_factory`` makes a new session when the current one is closed.
+        """
         self._session = session
+        self._session_factory = session_factory
         self.tz = tz
         self._base_url = base_url.rstrip("/")
         self._mirror_url = mirror_url
         self._user_agent = user_agent or build_user_agent()
         self._csrf_token: str | None = None
         self._bootstrap_lock = asyncio.Lock()
+
+    @property
+    def _active_session(self) -> aiohttp.ClientSession:
+        """Return the session, replacing it when Home Assistant has closed it.
+
+        The client outlives sessions: it is cached in ``hass.data``, while a
+        closed session raises ``RuntimeError`` on every request. A new session
+        has an empty cookie jar, so the CSRF token is dropped with the old one.
+        """
+        if self._session.closed and self._session_factory is not None:
+            self._session = self._session_factory()
+            self._csrf_token = None
+        return self._session
 
     async def async_get_streets(self) -> dict[str, list[str]]:
         """Return every settlement with its streets."""
@@ -444,7 +462,7 @@ class DtekClient:
     async def async_get_mirror(self) -> MirrorData:
         """Return ``fact`` and ``preset`` from the mirror."""
         try:
-            async with self._session.get(
+            async with self._active_session.get(
                 self._mirror_url,
                 headers={"User-Agent": self._user_agent},
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
@@ -493,9 +511,10 @@ class DtekClient:
         ``stale`` is a token the server just rejected.
         """
         async with self._bootstrap_lock:
+            session = self._active_session  # drops the token with a closed session
             if stale is not None and self._csrf_token == stale:
                 self._csrf_token = None
-                self._session.cookie_jar.clear(lambda cookie: cookie.key == CSRF_COOKIE)
+                session.cookie_jar.clear(lambda cookie: cookie.key == CSRF_COOKIE)
             if self._csrf_token is None:
                 # Without a token the server answers 400 and sets the cookie.
                 await self._async_post({"method": "getHomeNum"}, None)
@@ -517,7 +536,7 @@ class DtekClient:
         if token is not None:
             headers["X-CSRF-Token"] = mask_csrf_token(token)
         try:
-            async with self._session.post(
+            async with self._active_session.post(
                 f"{self._base_url}{SITE_AJAX_PATH}",
                 data=dict(form),
                 headers=headers,
@@ -558,9 +577,14 @@ async def async_get_client(hass: HomeAssistant) -> DtekClient:
     if (client := hass.data.get(DATA_CLIENT)) is not None:
         return client
     version = str(integration.version) if integration.version else None
+
+    def create_session() -> aiohttp.ClientSession:
+        return async_create_clientsession(hass, cookie_jar=aiohttp.CookieJar())
+
     client = hass.data[DATA_CLIENT] = DtekClient(
-        async_create_clientsession(hass, cookie_jar=aiohttp.CookieJar()),
+        create_session(),
         tz,
         user_agent=build_user_agent(version),
+        session_factory=create_session,
     )
     return client

@@ -274,6 +274,16 @@ async def test_no_csrf_cookie(
         await client.async_get_streets()
 
 
+async def test_closed_session_is_replaced(
+    hass: HomeAssistant, client: DtekClient, fake_dtek: FakeDtek
+) -> None:
+    """A session closed by Home Assistant is replaced, not reused."""
+    assert await client.async_get_streets()
+    await client._session.close()
+    assert await client.async_get_streets()
+    assert not client._session.closed
+
+
 async def test_mirror(client: DtekClient, fake_dtek: FakeDtek) -> None:
     """The mirror gives fact and preset."""
     data = await client.async_get_mirror()

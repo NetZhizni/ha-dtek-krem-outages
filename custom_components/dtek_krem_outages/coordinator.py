@@ -1,0 +1,691 @@
+"""Data update coordinator for DTEK KREM Outages.
+
+Each update asks DTEK for the street of the entry. The answer always holds
+the houses (group and current outage of the address) and holds the schedule
+only when it changed since the version we send. If DTEK fails, the schedule
+comes from the mirror when it is newer than ours.
+
+The schedule is merged into the stored one instead of replacing it: what
+already happened is kept as it was, the future follows the newest data. The
+result is saved in a Store, so a restart or an outage of both sources keeps
+the last known schedule working.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+import logging
+import math
+from typing import Any
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers.start import async_at_started
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
+
+from .api import (
+    AddressOutage,
+    DtekClient,
+    DtekError,
+    Fact,
+    House,
+    Preset,
+    preset_from_dict,
+)
+from .const import (
+    CONF_GROUP,
+    CONF_GROUP_MANUAL,
+    CONF_HOUSE,
+    CONF_SETTLEMENT,
+    CONF_SHOW_POSSIBLE,
+    CONF_STREET,
+    CONF_UPDATE_INTERVAL,
+    CONF_USE_MIRROR,
+    CONF_WARNING_MINUTES,
+    DEFAULT_SHOW_POSSIBLE,
+    DEFAULT_UPDATE_INTERVAL,
+    DEFAULT_USE_MIRROR,
+    DEFAULT_WARNING_MINUTES,
+    DOMAIN,
+    EVENT_ADDRESS_OUTAGE,
+    EVENT_BUS,
+    EVENT_GROUP_CHANGED,
+    EVENT_OUTAGE_ENDED,
+    EVENT_OUTAGE_STARTED,
+    EVENT_OUTAGE_WARNING,
+    EVENT_SCHEDULE_CHANGED,
+    EVENT_SCHEDULE_PUBLISHED,
+    FORCE_UPDATE_FACT,
+    HISTORY_DAYS,
+    MIN_UPDATE_INTERVAL,
+    SOURCE_DTEK,
+    SOURCE_MIRROR,
+    SOURCE_STORAGE,
+    STORAGE_SAVE_DELAY,
+    STORAGE_VERSION,
+    group_name,
+    signal_event,
+    storage_key,
+)
+from .schedule import (
+    SLOT_MAYBE,
+    DayChange,
+    Interval,
+    format_intervals,
+    future_changes,
+    intervals,
+    is_valid_slots,
+    merge_days,
+    outage_minutes,
+    slot_at,
+    slot_start,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+type DtekConfigEntry = ConfigEntry[DtekCoordinator]
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt_util.parse_datetime(value)
+    except ValueError:
+        return None
+
+
+def _parse_days(value: Any) -> dict[date, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    days: dict[date, str] = {}
+    for key, slots in value.items():
+        try:
+            day = date.fromisoformat(key)
+        except (TypeError, ValueError):
+            continue
+        if is_valid_slots(slots):
+            days[day] = slots
+    return days
+
+
+@dataclass(slots=True, kw_only=True)
+class DtekData:
+    """Snapshot of the state of an entry after an update."""
+
+    group: str
+    groups_at_address: list[str] = field(default_factory=list)
+    days: dict[date, str] = field(default_factory=dict)
+    preset: dict[int, str] = field(default_factory=dict)
+    outages: list[Interval] = field(default_factory=list)
+    possible: list[Interval] = field(default_factory=list)
+    fact_update: str | None = None
+    fact_updated_at: datetime | None = None
+    source: str = SOURCE_STORAGE
+    address_outage: AddressOutage | None = None
+    address_ok: bool = False
+    fetch_ok: bool = False
+    last_success: datetime | None = None
+    last_error: str | None = None
+
+    def current_outage(self, now: datetime) -> Interval | None:
+        """Return the scheduled outage in progress."""
+        return next((i for i in self.outages if i.start <= now < i.end), None)
+
+    def next_outage(self, now: datetime) -> Interval | None:
+        """Return the first scheduled outage that has not started yet."""
+        return next((i for i in self.outages if i.start > now), None)
+
+
+class DtekCoordinator(DataUpdateCoordinator[DtekData]):
+    """Fetch, merge, store and announce the schedule of one address."""
+
+    config_entry: DtekConfigEntry
+
+    def __init__(
+        self, hass: HomeAssistant, entry: DtekConfigEntry, client: DtekClient
+    ) -> None:
+        """Initialize the coordinator."""
+        options = entry.options
+        interval = max(
+            int(options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)),
+            MIN_UPDATE_INTERVAL,
+        )
+        super().__init__(
+            hass,
+            _LOGGER,
+            config_entry=entry,
+            name=f"{DOMAIN} {entry.title}",
+            update_interval=timedelta(minutes=interval),
+        )
+        self.client = client
+        self.tz = client.tz
+        self.settlement: str = entry.data[CONF_SETTLEMENT]
+        self.street: str = entry.data[CONF_STREET]
+        self.house: str = entry.data[CONF_HOUSE]
+        self.group: str = entry.data[CONF_GROUP]
+        self.group_manual: bool = bool(entry.data.get(CONF_GROUP_MANUAL, False))
+        self.warning = timedelta(
+            minutes=int(options.get(CONF_WARNING_MINUTES, DEFAULT_WARNING_MINUTES))
+        )
+        self.use_mirror = bool(options.get(CONF_USE_MIRROR, DEFAULT_USE_MIRROR))
+        self.show_possible = bool(
+            options.get(CONF_SHOW_POSSIBLE, DEFAULT_SHOW_POSSIBLE)
+        )
+        self._store: Store[dict[str, Any]] = Store(
+            hass, STORAGE_VERSION, storage_key(entry.entry_id)
+        )
+        self._days: dict[date, str] = {}
+        self._preset: dict[int, str] = {}
+        self._preset_update: str | None = None
+        self._fact_update: str | None = None
+        self._fact_updated_at: datetime | None = None
+        self._source = SOURCE_STORAGE
+        self._address_outage: AddressOutage | None = None
+        self._address_ok = False
+        self._fetch_ok = False
+        self._groups_at_address: list[str] = []
+        self._house_missing_logged = False
+        self._last_success: datetime | None = None
+        self._last_error: str | None = None
+        self._warned: set[str] = set()
+        # False until a schedule was recorded once: the first update is silent.
+        self._has_baseline = False
+        self._outage_now: Interval | None = None
+        self._outage_known = False
+        self._pending_events: list[tuple[str, dict[str, Any]]] = []
+        self._dispatch_enabled = False
+        self._unsub_timer: CALLBACK_TYPE | None = None
+
+    # -- storage ---------------------------------------------------------
+
+    @property
+    def address_key(self) -> str:
+        """Return the address the stored state belongs to."""
+        return f"{self.settlement}|{self.street}|{self.house}"
+
+    async def _async_setup(self) -> None:
+        """Load the state saved before the last restart.
+
+        A Store written for another address (the entry was reconfigured) is
+        ignored. For another group, past days stay as history and the next
+        update quietly fetches the schedule of the current group.
+        """
+        stored = await self._store.async_load()
+        if not isinstance(stored, Mapping) or stored.get("address") != self.address_key:
+            return
+        self._days = _parse_days(stored.get("days"))
+        self._last_success = _parse_iso(stored.get("last_success"))
+        if stored.get("group") != self.group:
+            today, _ = slot_at(dt_util.utcnow(), self.tz)
+            self._days = {day: s for day, s in self._days.items() if day <= today}
+            return
+        self._has_baseline = True
+        self._fact_update = stored.get("fact_update")
+        self._fact_updated_at = _parse_iso(stored.get("fact_updated_at"))
+        self._preset = preset_from_dict(stored.get("preset"))
+        self._preset_update = stored.get("preset_update")
+        self._address_outage = AddressOutage.from_dict(stored.get("address_outage"))
+        groups = stored.get("groups_at_address")
+        self._groups_at_address = list(groups) if isinstance(groups, list) else []
+        warned = stored.get("warned")
+        self._warned = {w for w in warned if isinstance(w, str)} if warned else set()
+
+    def _store_data(self) -> dict[str, Any]:
+        return {
+            "address": self.address_key,
+            "group": self.group,
+            "fact_update": self._fact_update,
+            "fact_updated_at": _isoformat(self._fact_updated_at),
+            "preset_update": self._preset_update,
+            "days": {day.isoformat(): slots for day, slots in self._days.items()},
+            "preset": {str(day): slots for day, slots in self._preset.items()},
+            "address_outage": self._address_outage.as_dict()
+            if self._address_outage
+            else None,
+            "groups_at_address": self._groups_at_address,
+            "warned": sorted(self._warned),
+            "last_success": _isoformat(self._last_success),
+        }
+
+    # -- update ------------------------------------------------------------
+
+    async def _async_update_data(self) -> DtekData:
+        """Fetch the street and schedule, merge and detect changes."""
+        now = dt_util.utcnow()
+        errors: list[str] = []
+        fact: Fact | None = None
+        preset: Preset | None = None
+        source = SOURCE_DTEK
+
+        dtek_ok = False
+        try:
+            fact, preset = await self._async_fetch_dtek()
+        except DtekError as err:
+            errors.append(f"DTEK: {err}")
+            self._address_ok = False
+        else:
+            dtek_ok = True
+
+        mirror_ok = False
+        if not dtek_ok and self.use_mirror:
+            try:
+                mirror = await self.client.async_get_mirror()
+            except DtekError as err:
+                errors.append(f"mirror: {err}")
+            else:
+                mirror_ok = True
+                source = SOURCE_MIRROR
+                if mirror.fact is not None and self._is_newer(mirror.fact):
+                    fact = mirror.fact
+                if mirror.preset is not None and (
+                    not self._preset or mirror.preset.update != self._preset_update
+                ):
+                    preset = mirror.preset
+
+        if not dtek_ok and not mirror_ok and not self._has_baseline:
+            raise UpdateFailed(
+                translation_domain=DOMAIN,
+                translation_key="update_failed",
+                translation_placeholders={"error": "; ".join(errors)},
+            )
+
+        changed = False
+        if fact is not None:
+            changed = self._apply_fact(fact, source, now)
+        if preset is not None and (group_preset := preset.for_group(self.group)):
+            self._preset = group_preset
+            self._preset_update = preset.update
+
+        self._fetch_ok = dtek_ok or mirror_ok
+        if self._fetch_ok:
+            self._last_success = now
+        self._last_error = "; ".join(errors) or None
+        if not self._has_baseline:
+            self._has_baseline = True
+            changed = True
+
+        self._prune(now)
+        if changed:
+            await self._store.async_save(self._store_data())
+        else:
+            self._store.async_delay_save(self._store_data, STORAGE_SAVE_DELAY)
+
+        self._evaluate(now)
+        self._schedule_timer(now)
+        return self._snapshot()
+
+    async def _async_fetch_dtek(self) -> tuple[Fact | None, Preset | None]:
+        """Ask DTEK for the street; follow a group change of the house."""
+        street = await self.client.async_get_street(
+            self.settlement, self.street, self._fact_update or FORCE_UPDATE_FACT
+        )
+        self._address_ok = True
+        if self._apply_house(street.houses.get(self.house)):
+            # The new group needs the whole schedule, not only changes.
+            street = await self.client.async_get_street(
+                self.settlement, self.street, FORCE_UPDATE_FACT
+            )
+        return street.fact, street.preset
+
+    def _is_newer(self, fact: Fact) -> bool:
+        """Return True if a mirror schedule is newer than the applied one."""
+        if fact.update is None or fact.update == self._fact_update:
+            return False
+        if fact.updated_at is not None and self._fact_updated_at is not None:
+            return fact.updated_at > self._fact_updated_at
+        return True
+
+    def _apply_fact(self, fact: Fact, source: str, now: datetime) -> bool:
+        """Merge a schedule; queue events for the days whose future changed."""
+        today, current_slot = slot_at(now, self.tz)
+        merged = merge_days(self._days, fact.for_group(self.group), today, current_slot)
+        changes = (
+            future_changes(self._days, merged, today, current_slot)
+            if self._has_baseline
+            else []
+        )
+        version_changed = fact.update != self._fact_update
+        self._days = merged
+        self._fact_update = fact.update
+        self._fact_updated_at = fact.updated_at
+        self._source = source
+        for change in changes:
+            self._queue_schedule_event(change, today)
+        return bool(changes) or version_changed
+
+    def _apply_house(self, house: House | None) -> bool:
+        """Take the group and outage of the address; True if the group changed."""
+        if house is None:
+            if not self._house_missing_logged:
+                _LOGGER.warning(
+                    "%s: house %s is not listed by DTEK for %s, %s any more",
+                    self.config_entry.title,
+                    self.house,
+                    self.settlement,
+                    self.street,
+                )
+                self._house_missing_logged = True
+            groups: list[str] = []
+            outage = None
+        else:
+            self._house_missing_logged = False
+            groups = house.groups
+            outage = house.outage
+
+        self._groups_at_address = list(groups)
+        self._update_address_outage(outage)
+
+        if self.group_manual or len(groups) != 1 or groups[0] == self.group:
+            return False
+        previous, self.group = self.group, groups[0]
+        _LOGGER.info(
+            "%s: DTEK moved the address from group %s to %s",
+            self.config_entry.title,
+            previous,
+            self.group,
+        )
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, data={**self.config_entry.data, CONF_GROUP: self.group}
+        )
+        # Today keeps its past; the days ahead belonged to the old group.
+        today, _ = slot_at(dt_util.utcnow(), self.tz)
+        self._days = {day: s for day, s in self._days.items() if day <= today}
+        self._fact_update = None
+        self._fact_updated_at = None
+        self._preset = {}
+        self._preset_update = None
+        self._queue(
+            EVENT_GROUP_CHANGED,
+            {"previous_group": previous, "previous_group_name": group_name(previous)},
+        )
+        return True
+
+    def _update_address_outage(self, outage: AddressOutage | None) -> None:
+        old, self._address_outage = self._address_outage, outage
+        if not self._has_baseline or old == outage:
+            return
+        if outage is None:
+            status = "cleared"
+        elif old is None or (old.reason, old.start) != (outage.reason, outage.start):
+            status = "new"
+        else:
+            status = "updated"
+        shown = outage or old
+        self._queue(
+            EVENT_ADDRESS_OUTAGE,
+            {
+                "status": status,
+                "reason": shown.reason if shown else None,
+                "kind": shown.kind if shown else None,
+                "start": _isoformat(shown.start) if shown else None,
+                "end": _isoformat(shown.end) if shown else None,
+                "previous_end": _isoformat(old.end) if old else None,
+            },
+        )
+
+    def _prune(self, now: datetime) -> None:
+        today, _ = slot_at(now, self.tz)
+        oldest = today - timedelta(days=HISTORY_DAYS)
+        self._days = {day: s for day, s in self._days.items() if day >= oldest}
+        cutoff = now - timedelta(days=1)
+        self._warned = {
+            w for w in self._warned if (start := _parse_iso(w)) and start > cutoff
+        }
+
+    def _snapshot(self) -> DtekData:
+        return DtekData(
+            group=self.group,
+            groups_at_address=list(self._groups_at_address),
+            days=dict(self._days),
+            preset=dict(self._preset),
+            outages=intervals(self._days, self.tz),
+            possible=intervals(self._days, self.tz, (SLOT_MAYBE,)),
+            fact_update=self._fact_update,
+            fact_updated_at=self._fact_updated_at,
+            source=self._source,
+            address_outage=self._address_outage,
+            address_ok=self._address_ok,
+            fetch_ok=self._fetch_ok,
+            last_success=self._last_success,
+            last_error=self._last_error,
+        )
+
+    # -- time based events -----------------------------------------------
+
+    @callback
+    def _evaluate(self, now: datetime) -> None:
+        """Queue started/ended events and warnings due at ``now``."""
+        outages = intervals(self._days, self.tz)
+        current = next((i for i in outages if i.start <= now < i.end), None)
+        if self._outage_known:
+            # An outage is identified by its start: finished slots never
+            # change, so a longer or shorter outage keeps its start.
+            previous = self._outage_now
+            current_start = current.start if current else None
+            previous_start = previous.start if previous else None
+            if previous is not None and previous_start != current_start:
+                upcoming = next((i for i in outages if i.start > now), None)
+                self._queue(
+                    EVENT_OUTAGE_ENDED,
+                    {
+                        **self._interval_data(previous),
+                        "next_start": _isoformat(upcoming.start.astimezone(self.tz))
+                        if upcoming
+                        else None,
+                        "next_end": _isoformat(upcoming.end.astimezone(self.tz))
+                        if upcoming
+                        else None,
+                    },
+                )
+            if current is not None and previous_start != current_start:
+                self._queue(EVENT_OUTAGE_STARTED, self._interval_data(current))
+        self._outage_now = current
+        self._outage_known = True
+
+        if self.warning <= timedelta(0):
+            return
+        for outage in outages:
+            if outage.start <= now or outage.start - self.warning > now:
+                continue
+            key = outage.start.isoformat()  # UTC, stable across restarts
+            if key in self._warned:
+                continue
+            self._warned.add(key)
+            self._store.async_delay_save(self._store_data, STORAGE_SAVE_DELAY)
+            self._queue(
+                EVENT_OUTAGE_WARNING,
+                {
+                    **self._interval_data(outage),
+                    "minutes": math.ceil((outage.start - now).total_seconds() / 60),
+                },
+            )
+
+    @callback
+    def _schedule_timer(self, now: datetime) -> None:
+        """Wake up at the next outage edge, warning or local midnight."""
+        self._cancel_timer()
+        moments: list[datetime] = []
+        for outage in intervals(self._days, self.tz):
+            moments.extend((outage.start, outage.end))
+            if self.warning > timedelta(0):
+                moments.append(outage.start - self.warning)
+        if (address := self._address_outage) is not None:
+            moments.extend(m for m in (address.start, address.end) if m is not None)
+        today, _ = slot_at(now, self.tz)
+        moments.append(slot_start(today, 48, self.tz))
+        if future := [m for m in moments if m > now]:
+            self._unsub_timer = async_track_point_in_utc_time(
+                self.hass, self._handle_timer, min(future)
+            )
+
+    @callback
+    def _handle_timer(self, _now: datetime) -> None:
+        self._unsub_timer = None
+        now = dt_util.utcnow()
+        self._evaluate(now)
+        self._schedule_timer(now)
+        if self.data is not None:
+            self.async_update_listeners()
+
+    @callback
+    def _cancel_timer(self) -> None:
+        if self._unsub_timer is not None:
+            self._unsub_timer()
+            self._unsub_timer = None
+
+    async def async_shutdown(self) -> None:
+        """Cancel the timer, write the state now and stop polling.
+
+        Writing now replaces a pending delayed save, which would otherwise
+        recreate the file after ``async_remove_entry`` deleted it.
+        """
+        self._cancel_timer()
+        if self._has_baseline:
+            await self._store.async_save(self._store_data())
+        await super().async_shutdown()
+
+    # -- events ------------------------------------------------------------
+
+    def _interval_data(self, interval: Interval) -> dict[str, Any]:
+        return {
+            **interval.as_dict(self.tz),
+            "duration_minutes": interval.minutes,
+        }
+
+    def _queue_schedule_event(self, change: DayChange, today: date) -> None:
+        day_slots = {change.day: change.current}
+        outages = intervals(day_slots, self.tz)
+        if change.day == today:
+            relative = "today"
+        elif change.day == today + timedelta(days=1):
+            relative = "tomorrow"
+        else:
+            relative = "other"
+        data: dict[str, Any] = {
+            "date": change.day.isoformat(),
+            "day": relative,
+            "outages": [i.as_dict(self.tz) for i in outages],
+            "outages_text": format_intervals(outages, self.tz),
+            "outage_minutes": outage_minutes(change.current),
+            "possible": [
+                i.as_dict(self.tz) for i in intervals(day_slots, self.tz, (SLOT_MAYBE,))
+            ],
+            "schedule": change.current,
+            "schedule_updated": _isoformat(self._fact_updated_at),
+            "source": self._source,
+        }
+        if change.previous is not None:
+            previous = intervals({change.day: change.previous}, self.tz)
+            data["previous_outages"] = [i.as_dict(self.tz) for i in previous]
+            data["previous_outages_text"] = format_intervals(previous, self.tz)
+            data["previous_outage_minutes"] = outage_minutes(change.previous)
+        self._queue(
+            EVENT_SCHEDULE_PUBLISHED if change.published else EVENT_SCHEDULE_CHANGED,
+            data,
+        )
+
+    def _queue(self, event_type: str, data: dict[str, Any]) -> None:
+        self._pending_events.append(
+            (
+                event_type,
+                {
+                    **data,
+                    "type": event_type,
+                    "group": self.group,
+                    "group_name": group_name(self.group),
+                    "settlement": self.settlement,
+                    "street": self.street,
+                    "house": self.house,
+                    "config_entry_id": self.config_entry.entry_id,
+                    "entry_title": self.config_entry.title,
+                },
+            )
+        )
+
+    @callback
+    def async_update_listeners(self) -> None:
+        """Update entities first, then send the queued events."""
+        super().async_update_listeners()
+        self._async_dispatch()
+
+    @callback
+    def async_enable_event_dispatch(self) -> CALLBACK_TYPE:
+        """Start sending events once Home Assistant has started.
+
+        Automations attach their triggers on ``homeassistant_started``; events
+        found while starting are queued until then instead of being lost.
+        """
+
+        @callback
+        def _started(_hass: HomeAssistant) -> None:
+            self._dispatch_enabled = True
+            self._async_dispatch()
+
+        return async_at_started(self.hass, _started)
+
+    @callback
+    def _async_dispatch(self) -> None:
+        if not self._dispatch_enabled or not self._pending_events:
+            return
+        pending, self._pending_events = self._pending_events, []
+        signal = signal_event(self.config_entry.entry_id)
+        for event_type, payload in pending:
+            _LOGGER.debug("%s: %s %s", self.config_entry.title, event_type, payload)
+            self.hass.bus.async_fire(EVENT_BUS, payload)
+            async_dispatcher_send(self.hass, signal, event_type, payload)
+
+    # -- service helpers ---------------------------------------------------
+
+    def schedule_dict(self) -> dict[str, Any]:
+        """Return the full state for the ``get_schedule`` service."""
+        data = self.data
+        days = {}
+        for day, slots in sorted(data.days.items()):
+            outages = intervals({day: slots}, self.tz)
+            days[day.isoformat()] = {
+                "outages": [i.as_dict(self.tz) for i in outages],
+                "outages_text": format_intervals(outages, self.tz),
+                "outage_minutes": outage_minutes(slots),
+                "possible": [
+                    i.as_dict(self.tz)
+                    for i in intervals({day: slots}, self.tz, (SLOT_MAYBE,))
+                ],
+                "schedule": slots,
+            }
+        return {
+            "config_entry_id": self.config_entry.entry_id,
+            "title": self.config_entry.title,
+            "settlement": self.settlement,
+            "street": self.street,
+            "house": self.house,
+            "group": data.group,
+            "group_name": group_name(data.group),
+            "groups_at_address": data.groups_at_address,
+            "schedule_updated": _isoformat(data.fact_updated_at),
+            "source": data.source,
+            "last_success": _isoformat(data.last_success),
+            "last_error": data.last_error,
+            "days": days,
+            "weekly": {str(day): slots for day, slots in sorted(data.preset.items())},
+            "address_outage": data.address_outage.as_dict()
+            if data.address_outage
+            else None,
+        }
+
+
+async def async_remove_store(hass: HomeAssistant, entry_id: str) -> None:
+    """Delete the stored state of an entry."""
+    await Store[dict[str, Any]](
+        hass, STORAGE_VERSION, storage_key(entry_id)
+    ).async_remove()

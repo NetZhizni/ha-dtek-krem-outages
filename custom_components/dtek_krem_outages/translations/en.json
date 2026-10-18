@@ -1,0 +1,171 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Settlement",
+        "description": "Outage schedules of DTEK Kyiv Regional Electric Networks (Kyiv region). Choose your address the same way as on dtek-krem.com.ua; start typing to search.",
+        "data": {
+          "settlement": "Settlement"
+        },
+        "data_description": {
+          "settlement": "City, town or village, e.g. \"м. Бориспіль\"."
+        }
+      },
+      "street": {
+        "title": "Street",
+        "description": "Streets of {settlement}.",
+        "data": {
+          "street": "Street"
+        },
+        "data_description": {
+          "street": "Villages without street names have \"Без вулиці\"."
+        }
+      },
+      "house": {
+        "title": "House",
+        "description": "Houses of {settlement}, {street}.",
+        "data": {
+          "house": "House number",
+          "name": "Name"
+        },
+        "data_description": {
+          "house": "As listed by DTEK, e.g. \"43\", \"8 а\" or \"1/2\".",
+          "name": "Leave empty to use the address."
+        }
+      },
+      "group": {
+        "title": "Group",
+        "description": "DTEK does not name exactly one group for {settlement}, {street}, {house} (listed: {groups}). Choose the group whose schedule to follow; the DTEK website shows it after you enter the address.",
+        "data": {
+          "group": "Group"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to DTEK. Submit again to retry.",
+      "unknown": "Unexpected error.",
+      "unknown_settlement": "Choose a settlement from the list.",
+      "unknown_street": "Choose a street from the list.",
+      "unknown_house": "Choose a house from the list.",
+      "no_houses": "DTEK lists no houses for this street. Submit again to retry."
+    },
+    "abort": {
+      "already_configured": "This address is already configured.",
+      "reconfigure_successful": "Re-configuration was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "DTEK KREM Outages options",
+        "data": {
+          "update_interval": "Update interval",
+          "warning_minutes": "Warning before an outage",
+          "use_mirror": "Use the backup source",
+          "show_possible": "Show possible outages in the calendar"
+        },
+        "data_description": {
+          "update_interval": "Minutes between requests to DTEK (at least 2).",
+          "warning_minutes": "Minutes before a scheduled outage to send the \"outage_warning\" event. 0 turns warnings off.",
+          "use_mirror": "When DTEK can't be reached, take the schedule from the public mirror github.com/Baskerville42/outage-data-ua.",
+          "show_possible": "Fill days without an actual schedule with the weekly schedule of possible outages."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "address_outage": {
+        "name": "Address outage"
+      },
+      "scheduled_outage": {
+        "name": "Scheduled outage"
+      }
+    },
+    "calendar": {
+      "outages": {
+        "name": "Outages"
+      }
+    },
+    "event": {
+      "events": {
+        "name": "Outage events",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "schedule_published": "Schedule published",
+              "schedule_changed": "Schedule changed",
+              "outage_warning": "Outage warning",
+              "outage_started": "Outage started",
+              "outage_ended": "Outage ended",
+              "address_outage": "Outage at address",
+              "group_changed": "Group changed"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "group": {
+        "name": "Group"
+      },
+      "last_update": {
+        "name": "Last update"
+      },
+      "next_outage": {
+        "name": "Next outage"
+      },
+      "outage_end": {
+        "name": "Outage end"
+      },
+      "outages_today": {
+        "name": "Outages today"
+      },
+      "outages_tomorrow": {
+        "name": "Outages tomorrow"
+      },
+      "schedule_updated": {
+        "name": "Schedule updated"
+      }
+    }
+  },
+  "exceptions": {
+    "update_failed": {
+      "message": "Error fetching the outage schedule: {error}"
+    },
+    "entry_not_found": {
+      "message": "No DTEK KREM Outages entry with ID {entry_id}."
+    },
+    "entry_not_loaded": {
+      "message": "DTEK KREM Outages entry {entry_id} is not loaded."
+    },
+    "no_loaded_entries": {
+      "message": "No DTEK KREM Outages entries are loaded."
+    },
+    "refresh_failed": {
+      "message": "Updating failed for: {entries}."
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh",
+      "description": "Fetches the schedule and the address status now.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Entry",
+          "description": "Entry to refresh. Leave empty to refresh all entries."
+        }
+      }
+    },
+    "get_schedule": {
+      "name": "Get schedule",
+      "description": "Returns the stored schedule by day, the weekly schedule of possible outages and the outage reported for the address.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Entry",
+          "description": "Entry to read. Leave empty to return all entries."
+        }
+      }
+    }
+  }
+}

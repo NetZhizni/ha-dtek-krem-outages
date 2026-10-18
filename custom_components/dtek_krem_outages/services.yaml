@@ -1,0 +1,15 @@
+refresh:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: dtek_krem_outages
+
+get_schedule:
+  fields:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: dtek_krem_outages

@@ -1,0 +1,171 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Населений пункт",
+        "description": "Графіки відключень ДТЕК Київські регіональні електромережі (Київська область). Оберіть адресу так само, як на dtek-krem.com.ua; почніть вводити назву для пошуку.",
+        "data": {
+          "settlement": "Населений пункт"
+        },
+        "data_description": {
+          "settlement": "Місто, селище або село, наприклад «м. Бориспіль»."
+        }
+      },
+      "street": {
+        "title": "Вулиця",
+        "description": "Вулиці: {settlement}.",
+        "data": {
+          "street": "Вулиця"
+        },
+        "data_description": {
+          "street": "Для сіл без назв вулиць є варіант «Без вулиці»."
+        }
+      },
+      "house": {
+        "title": "Будинок",
+        "description": "Будинки: {settlement}, {street}.",
+        "data": {
+          "house": "Номер будинку",
+          "name": "Назва"
+        },
+        "data_description": {
+          "house": "Як у списку ДТЕК, наприклад «43», «8 а» або «1/2».",
+          "name": "Залиште порожнім, щоб використати адресу."
+        }
+      },
+      "group": {
+        "title": "Черга",
+        "description": "ДТЕК не вказує для адреси {settlement}, {street}, {house} рівно одну чергу (у списку: {groups}). Оберіть чергу, графік якої відстежувати; сайт ДТЕК показує її після введення адреси.",
+        "data": {
+          "group": "Черга"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Не вдалося підключитися до ДТЕК. Натисніть «Надіслати», щоб спробувати ще раз.",
+      "unknown": "Неочікувана помилка.",
+      "unknown_settlement": "Оберіть населений пункт зі списку.",
+      "unknown_street": "Оберіть вулицю зі списку.",
+      "unknown_house": "Оберіть будинок зі списку.",
+      "no_houses": "ДТЕК не має будинків для цієї вулиці. Натисніть «Надіслати», щоб спробувати ще раз."
+    },
+    "abort": {
+      "already_configured": "Цю адресу вже додано.",
+      "reconfigure_successful": "Налаштування успішно змінено."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Параметри DTEK KREM Outages",
+        "data": {
+          "update_interval": "Інтервал оновлення",
+          "warning_minutes": "Попередження перед відключенням",
+          "use_mirror": "Використовувати запасне джерело",
+          "show_possible": "Показувати можливі відключення в календарі"
+        },
+        "data_description": {
+          "update_interval": "Хвилин між запитами до ДТЕК (щонайменше 2).",
+          "warning_minutes": "За скільки хвилин до відключення за графіком надсилати подію «outage_warning». 0 вимикає попередження.",
+          "use_mirror": "Коли ДТЕК недоступний, брати графік з публічного дзеркала github.com/Baskerville42/outage-data-ua.",
+          "show_possible": "Заповнювати дні без фактичного графіка тижневим графіком можливих відключень."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "address_outage": {
+        "name": "Відключення за адресою"
+      },
+      "scheduled_outage": {
+        "name": "Відключення за графіком"
+      }
+    },
+    "calendar": {
+      "outages": {
+        "name": "Відключення"
+      }
+    },
+    "event": {
+      "events": {
+        "name": "Події відключень",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "schedule_published": "Опубліковано графік",
+              "schedule_changed": "Графік змінено",
+              "outage_warning": "Попередження про відключення",
+              "outage_started": "Відключення почалося",
+              "outage_ended": "Відключення закінчилося",
+              "address_outage": "Відключення за адресою",
+              "group_changed": "Змінено чергу"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "group": {
+        "name": "Черга"
+      },
+      "last_update": {
+        "name": "Останнє успішне оновлення"
+      },
+      "next_outage": {
+        "name": "Наступне відключення"
+      },
+      "outage_end": {
+        "name": "Кінець поточного відключення"
+      },
+      "outages_today": {
+        "name": "Відключення сьогодні"
+      },
+      "outages_tomorrow": {
+        "name": "Відключення завтра"
+      },
+      "schedule_updated": {
+        "name": "Графік оновлено"
+      }
+    }
+  },
+  "exceptions": {
+    "update_failed": {
+      "message": "Помилка отримання графіка відключень: {error}"
+    },
+    "entry_not_found": {
+      "message": "Немає запису DTEK KREM Outages з ID {entry_id}."
+    },
+    "entry_not_loaded": {
+      "message": "Запис DTEK KREM Outages {entry_id} не завантажено."
+    },
+    "no_loaded_entries": {
+      "message": "Немає завантажених записів DTEK KREM Outages."
+    },
+    "refresh_failed": {
+      "message": "Не вдалося оновити: {entries}."
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Оновити",
+      "description": "Негайно отримує графік і стан адреси.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Запис",
+          "description": "Запис для оновлення. Залиште порожнім, щоб оновити всі."
+        }
+      }
+    },
+    "get_schedule": {
+      "name": "Отримати графік",
+      "description": "Повертає збережений графік по днях, тижневий графік можливих відключень і відключення, яке ДТЕК вказує для адреси.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Запис",
+          "description": "Запис для читання. Залиште порожнім, щоб отримати всі."
+        }
+      }
+    }
+  }
+}

@@ -24,6 +24,18 @@
 - **повідомляє про зміни**: `schedule_published` (з'явився графік на новий день, зазвичай на завтра) і `schedule_changed` (змінився залишок дня), з новими й попередніми відключеннями;
 - **попереджає про відключення**: `outage_warning` перед початком відключення за графіком і `outage_end_warning` перед його кінцем (поверненням світла), у позначені вами моменти (наприклад, за 30 і за 5 хвилин). `outage_started` і `outage_ended` приходять точно в момент, не чекаючи наступного опитування.
 
+## Як це виглядає
+
+<img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/dashboard.png" alt="Картки Markdown, Entities і Calendar з даними інтеграції" width="640">
+
+Налаштування: населений пункт → вулиця → будинок, як на сайті ДТЕК.
+
+<img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/setup.gif" alt="Додавання інтеграції: вибір населеного пункту, вулиці й будинку" width="400">
+
+| Пристрій | Календар |
+|---|---|
+| <img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/device.png" alt="Сторінка пристрою з сенсорами" width="380"> | <img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/calendar.png" alt="Календар відключень з подією" width="480"> |
+
 ## Звідки дані
 
 | Джерело | Що | Коли |
@@ -411,6 +423,14 @@ Workflow `Tag & Release` запускається на кожен push у `main`
 1. Підніміть `version` у `manifest.json`.
 2. Додайте секцію `## [X.Y.Z] - YYYY-MM-DD` у `CHANGELOG.md` (її наявність перевіряє тест).
 3. Зробіть push у `main`.
+
+## Зворотний зв'язок
+
+- Помилка, не знаходиться адреса чи не та черга — [створіть issue](https://github.com/NetZhizni/ha-dtek-krem-outages/issues/new/choose), для кожного випадку є шаблон.
+- Питання, ідеї, свої автоматизації й картки — у [Discussions](https://github.com/NetZhizni/ha-dtek-krem-outages/discussions).
+- Хочете допомогти з кодом — див. [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Якщо інтеграція вам корисна, поставте ⭐ репозиторію: так її легше знайти іншим.
 
 ## Ліцензія
 

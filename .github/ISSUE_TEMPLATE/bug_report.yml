@@ -1,0 +1,77 @@
+name: "🐞 Помилка / Bug"
+description: "Інтеграція працює не так, як описано в README / The integration does not behave as documented"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Дякуємо, що повідомили! Спершу перегляньте розділ [«Якщо щось не так»](https://github.com/NetZhizni/ha-dtek-krem-outages#якщо-щось-не-так): там відповіді на часті питання.
+
+        Thanks for the report! Please check [Troubleshooting](https://github.com/NetZhizni/ha-dtek-krem-outages/blob/main/doc/README_en.md#troubleshooting) first.
+
+        Якщо не знаходиться адреса або черга не та, оберіть шаблон **«Адреса чи черга»**. / For address or group problems, use the **Address or group** template.
+  - type: input
+    id: version
+    attributes:
+      label: "Версія інтеграції / Integration version"
+      description: "HACS → DTEK KREM Outages, або **Пристрої та служби → DTEK KREM Outages**"
+      placeholder: "0.1.3"
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: "Версія Home Assistant / Home Assistant version"
+      description: "**Налаштування → Про систему** / **Settings → About**"
+      placeholder: "2026.10.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: "Стан `sensor.…_dtek_connection` / State of `sensor.…_dtek_connection`"
+      options:
+        - "ok"
+        - "mirror"
+        - "offline"
+        - "Не знаю / Not sure"
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: "Що сталося / What happened"
+      description: "Що ви бачите в Home Assistant і коли це почалося. / What you see in Home Assistant and since when."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Що мало бути / What you expected"
+      description: "Наприклад, що в цей час показував сайт ДТЕК. / For example, what the DTEK site showed at that time."
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Журнал / Logs"
+      description: |
+        **Пристрої та служби → DTEK KREM Outages → ⋮ → Увімкнути журнал налагодження**, повторіть проблему, потім вимкніть журнал і вставте сюди рядки з `custom_components.dtek_krem_outages`.
+        **Devices & services → DTEK KREM Outages → ⋮ → Enable debug logging**, reproduce, then disable it and paste the `custom_components.dtek_krem_outages` lines here.
+      render: text
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: "Діагностика / Diagnostics"
+      description: |
+        **⋮ → Завантажити діагностику** і перетягніть файл сюди. Вулиця й номер будинку в ньому приховані.
+        **⋮ → Download diagnostics** and drop the file here. Street and house number are redacted.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "Перевірка / Checklist"
+      options:
+        - label: "Я переглянув розділ «Якщо щось не так» / I checked the troubleshooting section"
+          required: true
+        - label: "У тексті й файлах немає особистих даних, яких я не хочу публікувати / There is no personal data I don't want to publish"
+          required: true

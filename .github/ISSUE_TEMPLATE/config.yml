@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "💬 Питання й обговорення / Questions and discussion"
+    url: https://github.com/NetZhizni/ha-dtek-krem-outages/discussions
+    about: "Як налаштувати, приклади автоматизацій, поділитися картками / Setup help, automation examples, dashboards"
+  - name: "⚡ Питання про сам графік відключень / Questions about the outage schedule itself"
+    url: https://www.dtek-krem.com.ua/ua/shutdowns
+    about: "Графік і черги визначає ДТЕК КРЕМ; інтеграція лише показує їх / DTEK KREM sets the schedule and groups; the integration only shows them"

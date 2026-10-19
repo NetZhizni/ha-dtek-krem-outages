@@ -1,0 +1,20 @@
+name: "💡 Ідея / Feature request"
+description: "Запропонувати нову можливість / Suggest a new feature"
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Яку задачу це розв'яже / What problem does it solve"
+      description: "Опишіть ситуацію, а не лише рішення: наприклад, «хочу знати, коли графік на завтра стане відомий». / Describe the situation, not only the solution."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Як це могло б виглядати / How it could look"
+      description: "Сенсор, атрибут, подія, параметр, приклад автоматизації… / A sensor, attribute, event, option, automation example…"
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Як ви обходитесь зараз / How you work around it now"

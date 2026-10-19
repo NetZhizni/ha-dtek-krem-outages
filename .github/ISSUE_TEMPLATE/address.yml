@@ -1,0 +1,62 @@
+name: "🏠 Адреса чи черга / Address or group"
+description: "Не знаходиться населений пункт, вулиця чи будинок, не та черга або відключення за адресою / Settlement, street or house not found, wrong group or address outage"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issue публічне. Номер будинку вказувати не обов'язково: часто достатньо населеного пункту й вулиці.
+        Київ обслуговує інший оператор (ДТЕК КЕМ / Yasno), його ця інтеграція не охоплює.
+
+        This issue is public. The house number is optional: the settlement and street are often enough.
+        The city of Kyiv is served by another operator (DTEK KEM / Yasno) and is not covered.
+  - type: dropdown
+    id: problem
+    attributes:
+      label: "Що не так / What is wrong"
+      options:
+        - "Немає населеного пункту / Settlement not found"
+        - "Немає вулиці / Street not found"
+        - "Немає будинку / House not found"
+        - "Черга не та, що на сайті ДТЕК / Group differs from the DTEK site"
+        - "Відключення за адресою не збігається з сайтом / Address outage differs from the site"
+        - "Інше / Other"
+    validations:
+      required: true
+  - type: input
+    id: settlement
+    attributes:
+      label: "Населений пункт / Settlement"
+      placeholder: "м. Бориспіль"
+    validations:
+      required: true
+  - type: input
+    id: street
+    attributes:
+      label: "Вулиця / Street"
+      placeholder: "вул. Київський Шлях"
+  - type: input
+    id: house
+    attributes:
+      label: "Будинок (необов'язково) / House (optional)"
+  - type: textarea
+    id: site
+    attributes:
+      label: "Що показує сайт ДТЕК / What the DTEK site shows"
+      description: "Скриншот з [dtek-krem.com.ua/ua/shutdowns](https://www.dtek-krem.com.ua/ua/shutdowns) для цієї адреси дуже допомагає. / A screenshot of the DTEK site for this address helps a lot."
+    validations:
+      required: true
+  - type: textarea
+    id: integration
+    attributes:
+      label: "Що показує інтеграція / What the integration shows"
+      description: "Крок налаштування, де виникла проблема, або стан `sensor.…_group` / `sensor.…_address_status` з атрибутами. / The setup step that failed, or the state and attributes of the sensors."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "Версія інтеграції / Integration version"
+      placeholder: "0.1.3"
+    validations:
+      required: true

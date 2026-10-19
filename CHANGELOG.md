@@ -3,6 +3,13 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-10-19
+
+### Changed
+- `hacs.json` sets `"country": "UA"`: the integration only covers DTEK KREM (Kyiv region), as the HACS default list asks of country-specific repositories.
+- The HACS validation runs with no ignored checks: the brands check finds the icon in the integration's `brand/` folder.
+- README (Ukrainian and English): screenshots of the dashboard cards, setup, device page and calendar, and a feedback section. Issue forms (bug, address or group, feature request), a pull request checklist and `CONTRIBUTING.md`.
+
 ## [0.1.3] - 2026-10-18
 
 ### Added

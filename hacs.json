@@ -1,5 +1,6 @@
 {
   "name": "DTEK KREM Outages",
   "homeassistant": "2025.8.0",
+  "country": "UA",
   "render_readme": true
 }

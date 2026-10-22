@@ -187,6 +187,8 @@ class FakeDtek:
         }
         self.mirror_days: dict[date, dict[str, str]] | None = None
         self.mirror_update = "18.10.2026 09:00"
+        # False: getHomeNum answers without ``fact``/``preset`` whatever is asked.
+        self.send_fact = True
         self.ajax_error: Exception | None = None
         self.ajax_status = 200
         self.ajax_text: str | None = None
@@ -242,7 +244,11 @@ class FakeDtek:
         }
         update_fact = form.get("data[2][value]", "")
         # PHP truthiness: "" and "0" are false.
-        if update_fact not in ("", "0") and update_fact != self.update:
+        if (
+            self.send_fact
+            and update_fact not in ("", "0")
+            and update_fact != self.update
+        ):
             answer["fact"] = make_fact(self.days, self.update)
             answer["preset"] = make_preset(self.weekly, self.update)
         return self._json(method, url, answer)

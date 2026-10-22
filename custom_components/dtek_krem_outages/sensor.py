@@ -21,12 +21,27 @@ from .const import (
     ADDRESS_STATUS_NONE,
     ADDRESS_STATUSES,
     CONNECTION_STATES,
+    GROUPS_STATUS_MAIN,
+    GROUPS_STATUS_MAIN_ALL,
+    GROUPS_STATUS_MAIN_SOME,
+    GROUPS_STATUS_NONE,
+    GROUPS_STATUS_OTHERS_ALL,
+    GROUPS_STATUS_OTHERS_SOME,
+    GROUPS_STATUSES,
     OUTAGE_KIND_OTHER,
     group_name,
 )
 from .coordinator import DtekConfigEntry, DtekCoordinator
 from .entity import DtekEntity
-from .schedule import SLOT_MAYBE, format_intervals, intervals, outage_minutes, slot_at
+from .schedule import (
+    SLOT_MAYBE,
+    SLOT_OFF,
+    SLOTS_PER_DAY,
+    format_intervals,
+    intervals,
+    outage_minutes,
+    slot_at,
+)
 
 PARALLEL_UPDATES = 0
 
@@ -50,6 +65,13 @@ def _day_attributes(coordinator: DtekCoordinator, day: date) -> dict[str, Any]:
         "outages": [i.as_dict(tz) for i in outages],
         "possible_text": format_intervals(possible, tz),
         "schedule": slots,
+        # Each followed group alone, the main one first; None without a schedule.
+        "groups": {
+            group_name(group): format_intervals(intervals({day: days[day]}, tz), tz)
+            if day in days
+            else None
+            for group, days in coordinator.data.group_days.items()
+        },
     }
 
 
@@ -62,11 +84,97 @@ def _group_attributes(coordinator: DtekCoordinator, now: datetime) -> dict[str, 
     return {
         "group_id": data.group,
         "groups_at_address": [group_name(g) for g in data.groups_at_address],
+        "extra_groups": [group_name(g) for g in data.extra_groups],
+        # The mode in effect, like ``get_schedule``: ``main`` without others.
+        "groups_mode": data.groups_mode,
         "manual": coordinator.group_manual,
         "settlement": coordinator.settlement,
         "street": coordinator.street,
         "house": coordinator.house,
         "external_operator": data.external_operator,
+    }
+
+
+def _status(main_off: bool, others_off: int, extras: int) -> str:
+    """Return the groups status for the main group and some other groups off."""
+    all_others = extras > 0 and others_off >= extras
+    if main_off:
+        if all_others:
+            return GROUPS_STATUS_MAIN_ALL
+        return GROUPS_STATUS_MAIN_SOME if others_off else GROUPS_STATUS_MAIN
+    if all_others:
+        return GROUPS_STATUS_OTHERS_ALL
+    return GROUPS_STATUS_OTHERS_SOME if others_off else GROUPS_STATUS_NONE
+
+
+def _groups_status(coordinator: DtekCoordinator, now: datetime) -> str:
+    """Return which of the followed groups are off now, by their own schedule."""
+    data = coordinator.data
+    off = coordinator.groups_off(now)
+    return _status(
+        data.group in off,
+        len([g for g in off if g != data.group]),
+        len(data.extra_groups),
+    )
+
+
+def _groups_status_day(
+    coordinator: DtekCoordinator, day: date
+) -> list[dict[str, Any]] | None:
+    """Return the whole day as runs of one status with the same groups off.
+
+    None while no followed group has a schedule for the day. A group without
+    one counts as power on.
+    """
+    data = coordinator.data
+    schedules = {g: days[day] for g, days in data.group_days.items() if day in days}
+    if not schedules:
+        return None
+    # Each distinct status and set of groups off gets a letter, so the runs
+    # come from ``intervals`` like the outages do, right across a DST change.
+    runs: list[tuple[str, tuple[str, ...]]] = []
+    letters = []
+    for index in range(SLOTS_PER_DAY):
+        off = tuple(g for g, slots in schedules.items() if slots[index] == SLOT_OFF)
+        run = (
+            _status(
+                data.group in off,
+                len([g for g in off if g != data.group]),
+                len(data.extra_groups),
+            ),
+            off,
+        )
+        if run not in runs:
+            runs.append(run)
+        letters.append(chr(ord("a") + runs.index(run)))
+    tz = coordinator.tz
+    kinds = {chr(ord("a") + i) for i in range(len(runs))}
+    result = []
+    for item in intervals({day: "".join(letters)}, tz, kinds):
+        status, off = runs[ord(item.kind) - ord("a")]
+        result.append(
+            {
+                **item.as_dict(tz),
+                "state": status,
+                "level": GROUPS_STATUSES.index(status),
+                "groups": [group_name(g) for g in off],
+            }
+        )
+    return result
+
+
+def _groups_status_attributes(
+    coordinator: DtekCoordinator, now: datetime
+) -> dict[str, Any]:
+    data = coordinator.data
+    today = _today(coordinator, now)
+    return {
+        "groups_off": [group_name(g) for g in coordinator.groups_off(now)],
+        "main_group": group_name(data.group),
+        "extra_groups": [group_name(g) for g in data.extra_groups],
+        "level": GROUPS_STATUSES.index(_groups_status(coordinator, now)),
+        "today": _groups_status_day(coordinator, today),
+        "tomorrow": _groups_status_day(coordinator, today + timedelta(days=1)),
     }
 
 
@@ -204,6 +312,15 @@ SENSORS: tuple[DtekSensorDescription, ...] = (
         freshness=True,
     ),
     DtekSensorDescription(
+        key="groups_status",
+        translation_key="groups_status",
+        device_class=SensorDeviceClass.ENUM,
+        options=list(GROUPS_STATUSES),
+        value_fn=_groups_status,
+        attributes_fn=_groups_status_attributes,
+        freshness=True,
+    ),
+    DtekSensorDescription(
         key="address_status",
         translation_key="address_status",
         device_class=SensorDeviceClass.ENUM,
@@ -272,6 +389,9 @@ class DtekSensor(DtekEntity, SensorEntity):
     """A sensor computed from the schedule at the current time."""
 
     entity_description: DtekSensorDescription
+    # The whole-day timelines of the groups status change with the schedule
+    # and are there for charts, not for history.
+    _unrecorded_attributes = frozenset({"today", "tomorrow"})
 
     def __init__(
         self, coordinator: DtekCoordinator, description: DtekSensorDescription

@@ -3,6 +3,24 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-10-22
+
+### Added
+- The other groups DTEK lists for the house are followed besides the main group of the entry, each with its own schedule. A group DTEK adds is taken with the next update (after updating to this version, with the first one), with no reconfiguring; a group DTEK no longer lists is dropped after three answers in a row without it. A missing house, an empty group list or DTEK being down drop nothing.
+- `calendar.…_other_groups`: outages and possible outages of the other groups, each event named with its group.
+- "Other groups of the address in the schedule" option: the sensors, events, warnings and the `…_outages` calendar follow the main group only (default), an outage of any group, or an outage of all groups at once with the half-hours when only some are off as possible outages (a group with no schedule for the day yet is not taken as off). Combined, every event of the `…_outages` calendar names the groups off during it. What already happened is not rewritten.
+- `possible_outage_warning` event, at the same ticked times as `outage_warning`, before a possible outage that starts while the power is on.
+- `groups` field (the groups off at that time) in `outage_warning`, `possible_outage_warning`, `outage_end_warning`, `outage_started` and `outage_ended`.
+- "Leave out groups" option (entry with an address) and "Other groups" option (entry without an address). A group taken out of "Leave out groups" is back as soon as the options are saved.
+- `sensor.…_groups_status`: which followed groups are off now by their own schedules (`none`, `main`, `main_some`, `main_all`, `others_some`, `others_all`), with `groups_off`, a numeric `level`, and `today` / `tomorrow` with the whole day as runs of one status for charts of the past and the future; it switches at the edges of every group.
+- `groups_changed` event with `added`, `removed` and `extra_groups`.
+- `groups` attribute of `sensor.…_outages_today` / `…_outages_tomorrow`: the outages of every followed group alone, the main one first.
+- `extra_groups` and `groups_mode` (the mode in effect) attributes of `sensor.…_group`; `extra_groups`, `groups_mode` and `groups` (every followed group alone) in the `get_schedule` response.
+
+### Changed
+- When the house is missing from the DTEK answer or has no groups, `groups_at_address` keeps the groups known before instead of becoming empty.
+- README (Ukrainian and English): a section on several groups at one address with the setup steps and screenshots of the options and the calendar, a history graph of the groups status and a Markdown card with the schedule by group; the known limitations and the comparison updated.
+
 ## [0.1.4] - 2026-10-19
 
 ### Changed

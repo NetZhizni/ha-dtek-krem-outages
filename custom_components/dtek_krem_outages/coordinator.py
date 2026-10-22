@@ -14,13 +14,21 @@ The ``show*`` flags of the answer are followed like the DTEK page follows
 them: a hidden daily schedule clears the days from now on, a hidden weekly
 schedule is left out of the calendar. An entry set up by group only has no
 address to ask DTEK about and takes the schedule from the mirror.
+
+DTEK can list several groups for one house. The main group is the one of the
+entry; the others are followed too, each with its own merged schedule. They
+come and go with the DTEK answer: a new group is taken at once, a group that
+is no longer listed is dropped after a few answers without it. The schedule
+the entities show follows ``groups_mode``: the main group alone, the worst of
+all groups slot by slot, or an outage where all groups are off and a possible
+outage where some are. It is merged like a schedule from DTEK.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 import logging
 import math
 import random
@@ -49,8 +57,11 @@ from .api import (
     preset_from_dict,
 )
 from .const import (
+    CONF_EXCLUDED_GROUPS,
+    CONF_EXTRA_GROUPS,
     CONF_GROUP,
     CONF_GROUP_MANUAL,
+    CONF_GROUPS_MODE,
     CONF_HOUSE,
     CONF_LANGUAGE,
     CONF_SETTLEMENT,
@@ -65,6 +76,7 @@ from .const import (
     CONNECTION_OK,
     DATA_CURRENT,
     DATA_STALE,
+    DEFAULT_GROUPS_MODE,
     DEFAULT_LANGUAGE,
     DEFAULT_SHOW_POSSIBLE,
     DEFAULT_UPDATE_INTERVAL,
@@ -73,13 +85,20 @@ from .const import (
     EVENT_ADDRESS_OUTAGE,
     EVENT_BUS,
     EVENT_GROUP_CHANGED,
+    EVENT_GROUPS_CHANGED,
     EVENT_OUTAGE_END_WARNING,
     EVENT_OUTAGE_ENDED,
     EVENT_OUTAGE_STARTED,
     EVENT_OUTAGE_WARNING,
+    EVENT_POSSIBLE_OUTAGE_WARNING,
     EVENT_SCHEDULE_CHANGED,
     EVENT_SCHEDULE_PUBLISHED,
     FORCE_UPDATE_FACT,
+    GROUP_REMOVAL_UPDATES,
+    GROUPS,
+    GROUPS_MODE_ALL,
+    GROUPS_MODE_MAIN,
+    GROUPS_MODES,
     HISTORY_DAYS,
     LANGUAGES,
     MIN_UPDATE_INTERVAL,
@@ -98,8 +117,10 @@ from .const import (
 from .schedule import (
     ALL_ON,
     SLOT_MAYBE,
+    SLOT_OFF,
     DayChange,
     Interval,
+    combine_days,
     format_intervals,
     future_changes,
     intervals,
@@ -142,14 +163,48 @@ def _parse_days(value: Any) -> dict[date, str]:
     return days
 
 
+def _ordered_groups(groups: Any, skip: set[str] | frozenset[str]) -> list[str]:
+    """Return the known groups of a list in UI order, without the ``skip`` ones."""
+    if not isinstance(groups, list | tuple):
+        return []
+    return [group for group in GROUPS if group in groups and group not in skip]
+
+
+def _days_dict(days: Mapping[date, str], tz: tzinfo) -> dict[str, Any]:
+    """Return days as the ``get_schedule`` service gives them."""
+    result = {}
+    for day, slots in sorted(days.items()):
+        outages = intervals({day: slots}, tz)
+        result[day.isoformat()] = {
+            "outages": [i.as_dict(tz) for i in outages],
+            "outages_text": format_intervals(outages, tz),
+            "outage_minutes": outage_minutes(slots),
+            "possible": [
+                i.as_dict(tz) for i in intervals({day: slots}, tz, (SLOT_MAYBE,))
+            ],
+            "schedule": slots,
+        }
+    return result
+
+
 @dataclass(slots=True, kw_only=True)
 class DtekData:
-    """Snapshot of the state of an entry after an update."""
+    """Snapshot of the state of an entry after an update.
+
+    ``days`` and ``preset`` are what the entities show: the main group, or
+    every group followed combined by ``groups_mode``. ``group_days`` and
+    ``group_presets`` hold each followed group alone, the main one first.
+    """
 
     group: str
     groups_at_address: list[str] = field(default_factory=list)
+    extra_groups: list[str] = field(default_factory=list)
+    # The mode in effect: ``main`` while no other group is followed.
+    groups_mode: str = GROUPS_MODE_MAIN
     days: dict[date, str] = field(default_factory=dict)
     preset: dict[int, str] = field(default_factory=dict)
+    group_days: dict[str, dict[date, str]] = field(default_factory=dict)
+    group_presets: dict[str, dict[int, str]] = field(default_factory=dict)
     outages: list[Interval] = field(default_factory=list)
     possible: list[Interval] = field(default_factory=list)
     fact_update: str | None = None
@@ -166,6 +221,11 @@ class DtekData:
     blocked: bool = False
     publication: Publication = field(default_factory=Publication)
     external_operator: bool = False
+
+    @property
+    def combined(self) -> bool:
+        """Return True if the entities show several groups together."""
+        return self.groups_mode != GROUPS_MODE_MAIN
 
     @property
     def data_status(self) -> str:
@@ -219,26 +279,29 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self.has_address = bool(self.settlement and self.street and self.house)
         self.group: str = entry.data[CONF_GROUP]
         self.group_manual: bool = bool(entry.data.get(CONF_GROUP_MANUAL, False))
-        self.warn_start = tuple(
-            timedelta(minutes=m) for m in warning_thresholds(options, CONF_WARN_START)
-        )
-        self.warn_end = tuple(
-            timedelta(minutes=m) for m in warning_thresholds(options, CONF_WARN_END)
-        )
-        self.use_mirror = bool(options.get(CONF_USE_MIRROR, DEFAULT_USE_MIRROR))
-        self.show_possible = bool(
-            options.get(CONF_SHOW_POSSIBLE, DEFAULT_SHOW_POSSIBLE)
-        )
-        language = options.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
-        self.language: str = language if language in LANGUAGES else DEFAULT_LANGUAGE
+        self._read_options(options)
         # Entity translations in self.language, keyed like
         # ``component.<domain>.entity.sensor.group.name``.
         self.translations: dict[str, str] = {}
         self._store: Store[dict[str, Any]] = Store(
             hass, STORAGE_VERSION, storage_key(entry.entry_id)
         )
+        # What the entities show: the main group, or all groups combined.
         self._days: dict[date, str] = {}
-        self._preset: dict[int, str] = {}
+        # The other groups followed: those DTEK lists for the house, or the
+        # ones chosen in the options for an entry without an address.
+        self._extra_groups: list[str] = (
+            []
+            if self.has_address
+            else _ordered_groups(options.get(CONF_EXTRA_GROUPS), {self.group})
+        )
+        # Answers in a row without a followed group, until it is dropped.
+        self._missing_groups: dict[str, int] = {}
+        # Each followed group alone; a group without a key has no schedule yet.
+        self._group_days: dict[str, dict[date, str]] = {}
+        self._group_presets: dict[str, dict[int, str]] = {}
+        # A followed group has no schedule: ask for the whole one, not changes.
+        self._full_fact_needed = False
         self._preset_update: str | None = None
         self._fact_update: str | None = None
         self._fact_updated_at: datetime | None = None
@@ -267,6 +330,26 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._dispatch_enabled = False
         self._unsub_timer: CALLBACK_TYPE | None = None
 
+    def _read_options(self, options: Mapping[str, Any]) -> None:
+        """Take the options of the entry; the entry reloads when they change."""
+        self.warn_start = tuple(
+            timedelta(minutes=m) for m in warning_thresholds(options, CONF_WARN_START)
+        )
+        self.warn_end = tuple(
+            timedelta(minutes=m) for m in warning_thresholds(options, CONF_WARN_END)
+        )
+        self.use_mirror = bool(options.get(CONF_USE_MIRROR, DEFAULT_USE_MIRROR))
+        self.show_possible = bool(
+            options.get(CONF_SHOW_POSSIBLE, DEFAULT_SHOW_POSSIBLE)
+        )
+        mode = options.get(CONF_GROUPS_MODE, DEFAULT_GROUPS_MODE)
+        self.groups_mode: str = mode if mode in GROUPS_MODES else DEFAULT_GROUPS_MODE
+        self.excluded_groups = frozenset(
+            _ordered_groups(options.get(CONF_EXCLUDED_GROUPS), set())
+        )
+        language = options.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        self.language: str = language if language in LANGUAGES else DEFAULT_LANGUAGE
+
     # -- storage ---------------------------------------------------------
 
     @property
@@ -276,12 +359,18 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             return ""
         return f"{self.settlement}|{self.street}|{self.house}"
 
+    @property
+    def followed_groups(self) -> list[str]:
+        """Return the main group and the other groups followed, main first."""
+        return [self.group, *self._extra_groups]
+
     async def _async_setup(self) -> None:
         """Load the state saved before the last restart.
 
         A Store written for another address (the entry was reconfigured) is
         ignored. For another group, past days stay as history and the next
-        update quietly fetches the schedule of the current group.
+        update quietly fetches the schedule of the current group. A Store
+        saved before other groups were followed holds the main group only.
         """
         stored = await self._store.async_load()
         if not isinstance(stored, Mapping) or stored.get("address") != self.address_key:
@@ -298,7 +387,6 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._has_baseline = True
         self._fact_update = stored.get("fact_update")
         self._fact_updated_at = _parse_iso(stored.get("fact_updated_at"))
-        self._preset = preset_from_dict(stored.get("preset"))
         self._preset_update = stored.get("preset_update")
         self._address_outage = AddressOutage.from_dict(stored.get("address_outage"))
         groups = stored.get("groups_at_address")
@@ -306,15 +394,59 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         warned = stored.get("warned")
         self._warned = {w for w in warned if isinstance(w, str)} if warned else set()
 
+        if self.has_address:
+            # The groups DTEK listed last, and those still kept after DTEK
+            # stopped listing them; a group no longer left out in the options
+            # is back at once, with no event.
+            extra = stored.get("extra_groups")
+            self._extra_groups = _ordered_groups(
+                [*self._groups_at_address, *(extra if isinstance(extra, list) else [])],
+                {self.group, *self.excluded_groups},
+            )
+        followed = self.followed_groups
+        group_days = stored.get("group_days")
+        if isinstance(group_days, Mapping):
+            self._group_days = {
+                group: _parse_days(days)
+                for group, days in group_days.items()
+                if group in followed
+            }
+        else:
+            self._group_days = {self.group: dict(self._days)}
+        presets = stored.get("group_presets")
+        if not isinstance(presets, Mapping):
+            presets = {self.group: stored.get("preset")}
+        self._group_presets = {
+            group: preset
+            for group, raw in presets.items()
+            if group in followed and (preset := preset_from_dict(raw))
+        }
+        self._full_fact_needed = any(g not in self._group_days for g in followed)
+        # The options may have changed what is combined; that is no news.
+        self._update_days(dt_util.utcnow(), announce=False)
+
     def _store_data(self) -> dict[str, Any]:
         return {
             "address": self.address_key,
             "group": self.group,
+            "extra_groups": self._extra_groups,
             "fact_update": self._fact_update,
             "fact_updated_at": _isoformat(self._fact_updated_at),
             "preset_update": self._preset_update,
             "days": {day.isoformat(): slots for day, slots in self._days.items()},
-            "preset": {str(day): slots for day, slots in self._preset.items()},
+            # The main group alone, as 0.1.4 and older read it back.
+            "preset": {
+                str(day): slots
+                for day, slots in self._group_presets.get(self.group, {}).items()
+            },
+            "group_days": {
+                group: {day.isoformat(): slots for day, slots in days.items()}
+                for group, days in self._group_days.items()
+            },
+            "group_presets": {
+                group: {str(day): slots for day, slots in preset.items()}
+                for group, preset in self._group_presets.items()
+            },
             "address_outage": self._address_outage.as_dict()
             if self._address_outage
             else None,
@@ -338,6 +470,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
 
         dtek_ok = mirror_ok = False
         self._blocked = False
+        followed = self.followed_groups
         if self.has_address:
             try:
                 fact, preset = await self._async_fetch_dtek()
@@ -368,6 +501,9 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             )
 
         changed = self._apply_schedule(fact, preset, source, now, from_dtek=dtek_ok)
+        # The groups may have changed even without a new schedule.
+        changed = self._update_days(now) or changed
+        changed = changed or self.followed_groups != followed
         self._fetch_ok = dtek_ok or mirror_ok
         if self._fetch_ok:
             self._last_success = now
@@ -395,30 +531,41 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         *,
         from_dtek: bool,
     ) -> bool:
-        """Take a new schedule; True if it changed and needs saving now."""
+        """Take a new schedule for every followed group.
+
+        Returns True if its version changed and needs saving now; the days
+        the entities show follow in ``_update_days``.
+        """
         changed = False
         if from_dtek and self._publication.daily_hidden:
             changed = self._hide_daily(fact, now)
         elif fact is not None:
             changed = self._apply_fact(fact, source, now)
-        if preset is not None and (group_preset := preset.for_group(self.group)):
-            self._preset = group_preset
-            self._preset_update = preset.update
+        if preset is not None:
+            for group in self.followed_groups:
+                if group_preset := preset.for_group(group):
+                    self._group_presets[group] = group_preset
+            if self.group in self._group_presets:
+                self._preset_update = preset.update
         return changed
 
     async def _async_fetch_mirror(self) -> tuple[Fact | None, Preset | None]:
-        """Return what the mirror has newer than the applied schedule."""
+        """Return what the mirror has newer than the applied schedule.
+
+        A followed group without a schedule takes the same version too.
+        """
         mirror = await self.client.async_get_mirror()
         fact = preset = None
         # The mirror copies the schedule even while DTEK hides it.
         if (
             mirror.fact is not None
             and not self._publication.daily_hidden
-            and self._is_newer(mirror.fact)
+            and self._is_newer(mirror.fact, same=self._full_fact_needed)
         ):
             fact = mirror.fact
         if mirror.preset is not None and (
-            not self._preset or mirror.preset.update != self._preset_update
+            any(g not in self._group_presets for g in self.followed_groups)
+            or mirror.preset.update != self._preset_update
         ):
             preset = mirror.preset
         return fact, preset
@@ -448,51 +595,60 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         return delay * random.uniform(1 - RETRY_JITTER, 1 + RETRY_JITTER)  # noqa: S311
 
     async def _async_fetch_dtek(self) -> tuple[Fact | None, Preset | None]:
-        """Ask DTEK for the street; follow a group change of the house."""
+        """Ask DTEK for the street; follow the groups of the house."""
         settlement, street_name = self.settlement or "", self.street or ""
-        street = await self.client.async_get_street(
-            settlement, street_name, self._fact_update or FORCE_UPDATE_FACT
-        )
+        version = self._fact_update
+        if self._full_fact_needed or not version:
+            version = FORCE_UPDATE_FACT
+        street = await self.client.async_get_street(settlement, street_name, version)
         self._address_ok = True
         was_hidden = self._publication.daily_hidden
         self._publication = street.publication
-        # The new group needs the whole schedule, not only changes.
-        refetch = self._apply_house(find_house(street.houses, self.house or ""))
-        if was_hidden and not self._publication.daily_hidden and street.fact is None:
-            # Shown again: the days cleared meanwhile need the whole schedule.
-            refetch = True
-        if refetch:
+        self._apply_house(find_house(street.houses, self.house or ""))
+        # A new group needs the whole schedule, not only changes; so do the
+        # days cleared while the schedule was hidden, once it is shown again.
+        # A request that already asked for the whole one is not repeated.
+        shown_again = was_hidden and not self._publication.daily_hidden
+        if (
+            street.fact is None
+            and version != FORCE_UPDATE_FACT
+            and (self._full_fact_needed or shown_again)
+        ):
             street = await self.client.async_get_street(
                 settlement, street_name, FORCE_UPDATE_FACT
             )
             self._publication = street.publication
         return street.fact, street.preset
 
-    def _is_newer(self, fact: Fact) -> bool:
-        """Return True if a mirror schedule is newer than the applied one."""
-        if fact.update is None or fact.update == self._fact_update:
+    def _is_newer(self, fact: Fact, *, same: bool = False) -> bool:
+        """Return True if a mirror schedule is newer than the applied one.
+
+        With ``same``, the applied version itself counts too.
+        """
+        if fact.update is None:
             return False
+        if fact.update == self._fact_update:
+            return same
         if fact.updated_at is not None and self._fact_updated_at is not None:
             return fact.updated_at > self._fact_updated_at
         return True
 
     def _apply_fact(self, fact: Fact, source: str, now: datetime) -> bool:
-        """Merge a schedule; queue events for the days whose future changed."""
+        """Merge a schedule into every followed group; True for a new version."""
         today, current_slot = slot_at(now, self.tz)
-        merged = merge_days(self._days, fact.for_group(self.group), today, current_slot)
-        changes = (
-            future_changes(self._days, merged, today, current_slot)
-            if self._has_baseline
-            else []
-        )
+        for group in self.followed_groups:
+            self._group_days[group] = merge_days(
+                self._group_days.get(group, {}),
+                fact.for_group(group),
+                today,
+                current_slot,
+            )
         version_changed = fact.update != self._fact_update
-        self._days = merged
         self._fact_update = fact.update
         self._fact_updated_at = fact.updated_at
         self._source = source
-        for change in changes:
-            self._queue_schedule_event(change, today)
-        return bool(changes) or version_changed
+        self._full_fact_needed = False
+        return version_changed
 
     def _hide_daily(self, fact: Fact | None, now: datetime) -> bool:
         """Clear the schedule from now on while DTEK hides it.
@@ -502,26 +658,97 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         the schedule is asked for again once it is shown.
         """
         today, current_slot = slot_at(now, self.tz)
-        cleared = {day: ALL_ON for day in self._days if day >= today}
-        merged = merge_days(self._days, cleared, today, current_slot)
-        changes = (
-            future_changes(self._days, merged, today, current_slot)
-            if self._has_baseline
-            else []
-        )
-        self._days = merged
+        for group, days in self._group_days.items():
+            cleared = {day: ALL_ON for day in days if day >= today}
+            self._group_days[group] = merge_days(days, cleared, today, current_slot)
         version_changed = False
         if fact is not None:
             version_changed = fact.update != self._fact_update
             self._fact_update = fact.update
             self._fact_updated_at = fact.updated_at
             self._source = SOURCE_DTEK
+            self._full_fact_needed = False
+        return version_changed
+
+    def _mode(self) -> str:
+        """Return the groups mode in effect: the main group alone without others."""
+        return self.groups_mode if self._extra_groups else GROUPS_MODE_MAIN
+
+    def _target_days(self) -> dict[date, str]:
+        """Return the schedule the entities follow, before the merge."""
+        if (mode := self._mode()) == GROUPS_MODE_MAIN:
+            return dict(self._group_days.get(self.group, {}))
+        return combine_days(
+            (self._group_days.get(g, {}) for g in self.followed_groups),
+            every=mode == GROUPS_MODE_ALL,
+        )
+
+    def _target_preset(self) -> dict[int, str]:
+        """Return the weekly schedule the calendar shows."""
+        if (mode := self._mode()) == GROUPS_MODE_MAIN:
+            return dict(self._group_presets.get(self.group, {}))
+        return combine_days(
+            (self._group_presets.get(g, {}) for g in self.followed_groups),
+            every=mode == GROUPS_MODE_ALL,
+        )
+
+    def groups_off(self, now: datetime) -> list[str]:
+        """Return the followed groups whose own schedule has an outage now."""
+        day, index = slot_at(now, self.tz)
+        return [
+            group
+            for group in self.followed_groups
+            if (slots := self._group_days.get(group, {}).get(day)) is not None
+            and slots[index] == SLOT_OFF
+        ]
+
+    def groups_in(self, interval: Interval) -> list[str]:
+        """Return the groups with an outage or possible outage in ``interval``.
+
+        Only the groups the schedule of the entities follows: the main group
+        alone, or every followed group when they are combined.
+        """
+        if self._mode() == GROUPS_MODE_MAIN:
+            return [self.group]
+        return [
+            group
+            for group in self.followed_groups
+            if any(
+                item.start < interval.end and interval.start < item.end
+                for item in intervals(
+                    self._group_days.get(group, {}), self.tz, (SLOT_OFF, SLOT_MAYBE)
+                )
+            )
+        ]
+
+    def _update_days(self, now: datetime, *, announce: bool = True) -> bool:
+        """Merge the schedule of the groups into the days the entities show.
+
+        What already happened stays as it was. Days ahead that none of the
+        groups has any more (a group was dropped) are dropped too. Returns
+        True if the future changed; events are queued for it.
+        """
+        today, current_slot = slot_at(now, self.tz)
+        target = self._target_days()
+        merged = {
+            day: slots
+            for day, slots in merge_days(
+                self._days, target, today, current_slot
+            ).items()
+            if day <= today or day in target
+        }
+        changes = (
+            future_changes(self._days, merged, today, current_slot)
+            if self._has_baseline and announce
+            else []
+        )
+        self._days = merged
         for change in changes:
             self._queue_schedule_event(change, today)
-        return bool(changes) or version_changed
+        return bool(changes)
 
-    def _apply_house(self, house: House | None) -> bool:
-        """Take the group and outage of the address; True if the group changed."""
+    def _apply_house(self, house: House | None) -> None:
+        """Take the groups and the outage of the address."""
         if house is None:
             if not self._house_missing_logged:
                 _LOGGER.warning(
@@ -552,11 +779,78 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
                 self.house,
             )
         self._external_operator = external
-        self._groups_at_address = list(groups)
         self._update_address_outage(outage)
+        # A missing house or an empty list is not taken as the house losing
+        # its groups: the groups known stay.
+        if not groups:
+            return
+        self._groups_at_address = list(groups)
 
+        previous_main, previous_extra = self.group, list(self._extra_groups)
+        self._follow_main_group(groups)
+        self._follow_extra_groups(groups)
+        followed = self.followed_groups
+        self._group_days = {g: d for g, d in self._group_days.items() if g in followed}
+        self._group_presets = {
+            g: p for g, p in self._group_presets.items() if g in followed
+        }
+        if any(g not in self._group_days for g in followed):
+            self._full_fact_needed = True
+
+        # The main group moving in or out of the other groups is no news.
+        added = [
+            g for g in self._extra_groups if g not in [*previous_extra, previous_main]
+        ]
+        removed = [
+            g for g in previous_extra if g not in [*self._extra_groups, self.group]
+        ]
+        if not added and not removed:
+            return
+        _LOGGER.info(
+            "%s: other groups of the address are now %s (added %s, removed %s)",
+            self.config_entry.title,
+            self._extra_groups,
+            added,
+            removed,
+        )
+        if self._has_baseline:
+            self._queue(
+                EVENT_GROUPS_CHANGED,
+                {
+                    "added": [group_name(g) for g in added],
+                    "removed": [group_name(g) for g in removed],
+                    "extra_groups": [group_name(g) for g in self._extra_groups],
+                },
+            )
+
+    def _follow_extra_groups(self, groups: list[str]) -> None:
+        """Follow the other groups DTEK lists for the house.
+
+        A new group is taken at once. A group no longer listed stays for
+        GROUP_REMOVAL_UPDATES answers in a row without it, so a passing glitch
+        of DTEK adds and removes nothing.
+        """
+        listed = _ordered_groups(groups, {self.group, *self.excluded_groups})
+        kept: list[str] = []
+        for group in self._extra_groups:
+            if group in listed or group == self.group:
+                continue
+            misses = self._missing_groups.get(group, 0) + 1
+            if misses < GROUP_REMOVAL_UPDATES:
+                self._missing_groups[group] = misses
+                kept.append(group)
+        self._missing_groups = {
+            g: misses for g, misses in self._missing_groups.items() if g in kept
+        }
+        self._extra_groups = _ordered_groups([*listed, *kept], {self.group})
+
+    def _follow_main_group(self, groups: list[str]) -> None:
+        """Move to the group DTEK lists when it is the only one.
+
+        A group chosen by the user is never replaced.
+        """
         if self.group_manual or len(groups) != 1 or groups[0] == self.group:
-            return False
+            return
         previous, self.group = self.group, groups[0]
         _LOGGER.info(
             "%s: DTEK moved the address from group %s to %s",
@@ -572,13 +866,12 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._days = {day: s for day, s in self._days.items() if day <= today}
         self._fact_update = None
         self._fact_updated_at = None
-        self._preset = {}
         self._preset_update = None
+        self._full_fact_needed = True
         self._queue(
             EVENT_GROUP_CHANGED,
             {"previous_group": previous, "previous_group_name": group_name(previous)},
         )
-        return True
 
     def _update_address_outage(self, outage: AddressOutage | None) -> None:
         old, self._address_outage = self._address_outage, outage
@@ -607,6 +900,10 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         today, _ = slot_at(now, self.tz)
         oldest = today - timedelta(days=HISTORY_DAYS)
         self._days = {day: s for day, s in self._days.items() if day >= oldest}
+        self._group_days = {
+            group: {day: s for day, s in days.items() if day >= oldest}
+            for group, days in self._group_days.items()
+        }
         cutoff = now - timedelta(days=1)
         # Keys are ``<kind>@<minutes>@<moment>``; older ones are the bare moment.
         self._warned = {
@@ -616,11 +913,16 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         }
 
     def _snapshot(self) -> DtekData:
+        followed = self.followed_groups
         return DtekData(
             group=self.group,
             groups_at_address=list(self._groups_at_address),
+            extra_groups=list(self._extra_groups),
+            groups_mode=self._mode(),
             days=dict(self._days),
-            preset=dict(self._preset),
+            preset=self._target_preset(),
+            group_days={g: dict(self._group_days.get(g, {})) for g in followed},
+            group_presets={g: dict(self._group_presets.get(g, {})) for g in followed},
             outages=intervals(self._days, self.tz),
             possible=intervals(self._days, self.tz, (SLOT_MAYBE,)),
             fact_update=self._fact_update,
@@ -693,6 +995,30 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
                     thresholds=ends,
                     event_type=EVENT_OUTAGE_END_WARNING,
                 )
+        for possible in self._possible_outages():
+            if possible.start > now:
+                self._warn(
+                    now,
+                    possible,
+                    "possible",
+                    possible.start,
+                    thresholds=self.warn_start,
+                    event_type=EVENT_POSSIBLE_OUTAGE_WARNING,
+                )
+
+    def _possible_outages(self) -> list[Interval]:
+        """Return the possible outages that start while the power is on.
+
+        One that follows an outage straight away gets no warning: the power is
+        off already.
+        """
+        items = intervals(self._days, self.tz, (SLOT_OFF, SLOT_MAYBE))
+        return [
+            item
+            for index, item in enumerate(items)
+            if item.kind == SLOT_MAYBE
+            and (index == 0 or items[index - 1].end != item.start)
+        ]
 
     def _warn(
         self,
@@ -737,6 +1063,12 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             moments.extend(
                 outage.end - t for t in self.warn_end if outage.end - t > outage.start
             )
+        for possible in self._possible_outages():
+            moments.extend(possible.start - t for t in self.warn_start)
+        # The groups status sensor switches at the edges of every group.
+        for days in self._group_days.values():
+            for item in intervals(days, self.tz):
+                moments.extend((item.start, item.end))
         if (address := self._address_outage) is not None:
             moments.extend(m for m in (address.start, address.end) if m is not None)
         today, _ = slot_at(now, self.tz)
@@ -784,6 +1116,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         return {
             **interval.as_dict(self.tz),
             "duration_minutes": interval.minutes,
+            "groups": [group_name(g) for g in self.groups_in(interval)],
         }
 
     def _queue_schedule_event(self, change: DayChange, today: date) -> None:
@@ -871,21 +1204,12 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
     # -- service helpers ---------------------------------------------------
 
     def schedule_dict(self) -> dict[str, Any]:
-        """Return the full state for the ``get_schedule`` service."""
+        """Return the full state for the ``get_schedule`` service.
+
+        ``days`` and ``weekly`` are what the entities show; ``groups`` has
+        every followed group alone.
+        """
         data = self.data
-        days = {}
-        for day, slots in sorted(data.days.items()):
-            outages = intervals({day: slots}, self.tz)
-            days[day.isoformat()] = {
-                "outages": [i.as_dict(self.tz) for i in outages],
-                "outages_text": format_intervals(outages, self.tz),
-                "outage_minutes": outage_minutes(slots),
-                "possible": [
-                    i.as_dict(self.tz)
-                    for i in intervals({day: slots}, self.tz, (SLOT_MAYBE,))
-                ],
-                "schedule": slots,
-            }
         return {
             "config_entry_id": self.config_entry.entry_id,
             "title": self.config_entry.title,
@@ -895,6 +1219,8 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             "group": data.group,
             "group_name": group_name(data.group),
             "groups_at_address": data.groups_at_address,
+            "extra_groups": data.extra_groups,
+            "groups_mode": data.groups_mode,
             "external_operator": data.external_operator,
             "schedule_updated": _isoformat(data.fact_updated_at),
             "source": data.source,
@@ -904,8 +1230,21 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             "last_success": _isoformat(data.last_success),
             "last_dtek_success": _isoformat(data.last_dtek_success),
             "last_error": data.last_error,
-            "days": days,
+            "days": _days_dict(data.days, self.tz),
             "weekly": {str(day): slots for day, slots in sorted(data.preset.items())},
+            "groups": {
+                group: {
+                    "group_name": group_name(group),
+                    "days": _days_dict(days, self.tz),
+                    "weekly": {
+                        str(day): slots
+                        for day, slots in sorted(
+                            data.group_presets.get(group, {}).items()
+                        )
+                    },
+                }
+                for group, days in data.group_days.items()
+            },
             "address_outage": data.address_outage.as_dict()
             if data.address_outage
             else None,

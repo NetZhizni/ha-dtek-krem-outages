@@ -21,8 +21,9 @@ The schedule changes often, sometimes several times a day. So the integration:
 - **keeps the current state** in Home Assistant storage: the schedule by day, its DTEK version, the weekly schedule of possible outages and the outage reported for the address. A restart, or both data sources being down (common during blackouts), doesn't lose the schedule: entities keep working on what is stored, and the `data_status` attribute tells that the last update did not confirm it;
 - **applies a new version only to the future**: half-hours that already passed keep what was in effect, the current and later half-hours take the new values. Days DTEK doesn't list (tomorrow before it is published) are kept;
 - **shows what the DTEK website shows**: when the page hides the schedule of the day or the weekly schedule of possible outages, the entities and the calendar hide it too;
+- **follows every group of the house**: when DTEK lists several groups for the address (including one added later), the other groups are shown in a calendar of their own and, if wanted, combined with the main one into one schedule;
 - **announces changes**: `schedule_published` (a new day appeared, usually tomorrow) and `schedule_changed` (the rest of a day changed), with the new and the previous outages;
-- **warns before outages**: `outage_warning` before a scheduled outage starts and `outage_end_warning` before it ends (power returns), each at the times you tick (e.g. 30 and 5 minutes). `outage_started` and `outage_ended` come at the exact times, without waiting for the next poll.
+- **warns before outages**: `outage_warning` before a scheduled outage starts, `possible_outage_warning` before a possible outage and `outage_end_warning` before an outage ends (power returns), each at the times you tick (e.g. 30 and 5 minutes). `outage_started` and `outage_ended` come at the exact times, without waiting for the next poll.
 
 ## What it looks like
 
@@ -91,7 +92,7 @@ Restart Home Assistant afterwards. To switch to a release later, `git fetch --ta
 1. **Settlement**: start typing, e.g. `Бориспіль`. The list is the one DTEK uses (about 1200 settlements).
 2. **Street**: villages without street names have `Без вулиці`. DTEK lists some places under several spellings (`с. Софіївська Борщагівка` and `Софіївська Борщагівка`). The streets of all of them are shown, the ones of another spelling with it in brackets, so the settlement you picked does not matter.
 3. **House**: as DTEK lists it (`43`, `8 а`, `1/2`, ...). Optionally give the entry a short **Name**, e.g. `Home`: entity IDs are built from it (`sensor.home_next_outage`). The examples below assume that name. **Language of entity names**: Ukrainian (default), English or Russian, see the options below.
-4. **Group**: asked only when DTEK lists no group or several groups for the house. Otherwise the group is detected, and if DTEK later moves the house to another group the entry follows it (`group_changed` event). A group you chose yourself is never replaced.
+4. **Group**: asked only when DTEK lists no group or several groups for the house. Otherwise the group is detected, and if DTEK later moves the house to another group the entry follows it (`group_changed` event). A group you chose yourself is never replaced. With several groups, the one you choose is the main group and the others are followed too, see [Several groups at one address](#several-groups-at-one-address).
 
 Each address can be added once; add several entries for several addresses. **⋮ → Reconfigure** changes the address or group.
 
@@ -102,15 +103,50 @@ When the list of settlements can't be loaded from DTEK while adding the entry, t
 - **Try again**;
 - **Follow a group without an address**: you choose the group (the DTEK website shows it after you enter the address), and the schedule comes from the mirror. There is no address data then (group detection and changes, outages at the address), so the address entities are not created. The entry gets a title like `Черга 3.1` (`Group 3.1` in English). Once DTEK is back, the address can be added with **⋮ → Reconfigure**.
 
+### Several groups at one address
+
+DTEK sometimes lists several groups for one house, e.g. when its entrances are on different lines. The main group is the one of the entry; the other groups DTEK lists for the house are followed with it, each with its own schedule:
+
+- **A new group** is taken with the next update, with no reconfiguring, and a `groups_changed` event fires. The same goes after updating the integration to this version: the groups DTEK already lists are taken with the first request.
+- **A group DTEK no longer lists** is dropped after three answers in a row without it (about 15 min with a 5 min interval), with a `groups_changed` event. If the house is missing from the DTEK answer, its group list is empty or DTEK doesn't answer, nothing is dropped.
+- **Where to see them**: the `calendar.…_other_groups` calendar (every event named with its group, e.g. `Group 4.2: Power outage`), the `extra_groups` attribute of `sensor.…_group` and `groups` in the `get_schedule` response.
+- **Schedule mode**: the "Other groups of the address in the schedule" option tells what all entities, events, warnings and the `…_outages` calendar follow:
+  - **Main group only** (default): the other groups are only in the `…_other_groups` calendar;
+  - **Outage when any group is off**: every half hour takes the worst of the groups — an outage if any group has one, else a possible outage, else power;
+  - **Outage when all groups are off, possible outage when some are**: an outage (`scheduled_outage`, `next_outage`, `outage_warning`) only where all groups are off at once, and where only some are, a possible outage with the `possible_outage_warning` warning. A group with no schedule for that day yet is not taken as off: an outage of the others is then only possible.
+- **In the combined modes** every event of the `…_outages` calendar names the groups off during it (`Groups 3.1, 5.1`), and the warnings and outage events have a `groups` field. What already happened is not rewritten: a change of the groups or of the mode changes the schedule from now on only.
+- **A group that isn't yours**: if you know your entrance is on the main group, tick the others in the "Leave out groups" option. A group taken out of it is back as soon as the options are saved, with no `groups_changed` event.
+
+The "any group" mode is pessimistic: a flat is usually fed by one line, so it can show outages you won't have. It helps when something the whole house shares (a lift, a pump) is on another line. The "all groups" mode suits when you don't know your group: its outages are certain, and its possible outages depend on which line is yours.
+
+How to set it up:
+
+1. Nothing is needed to see the other groups: they appear in the `…_other_groups` calendar (in the **Calendar** side panel, "Entry name Other groups", e.g. "Home Інші черги" with Ukrainian names) as soon as DTEK lists them. Tick both calendars to see the main and the other groups together:
+
+   <img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/other-groups-calendar.png" alt="Calendar: events of the main group and of group 5.1 side by side" width="480">
+
+2. For the sensors and warnings to follow the other groups: **Settings → Devices & services → DTEK KREM Outages →** the cog next to the entry. At the bottom of the form, in **"Other groups of the address in the schedule"**, choose the mode and press **Submit**; the entry reloads by itself.
+
+   <img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/groups-options.png" alt="Options: the &quot;Other groups of the address in the schedule&quot; mode and &quot;Leave out groups&quot;" width="480">
+
+3. If a group doesn't concern you, add it to **"Leave out groups"** in the same form.
+
+When you don't know which line feeds your flat, the third mode suits: the `…_outages` calendar shows "Power outage" where all groups are off and "Possible outage" where some are, with the groups named in the event description; `outage_warning` comes before an outage of all groups, `possible_outage_warning` before a possible one.
+
+The main group changes by the same rules as before: one detected automatically is replaced when DTEK leaves exactly one other group for the house, one you chose never is. An entry without an address doesn't know the groups of the house: its other groups are chosen in the "Other groups" option.
+
 ### Options
 
 | Option | Default | Description |
 |---|---|---|
 | Update interval | 5 min | Minutes between requests to DTEK, at least 2. After failures it grows for a while, up to 15 min (or your interval if it is longer) |
-| Warn before an outage starts | 30 min | Checkboxes (1, 5, 10, 15, 30, 60, 120 min): when `outage_warning` fires, one event per ticked time; nothing ticked turns it off |
+| Warn before an outage starts | 30 min | Checkboxes (1, 5, 10, 15, 30, 60, 120 min): when `outage_warning` fires, and `possible_outage_warning` before a possible outage, one event per ticked time; nothing ticked turns it off |
 | Warn before an outage ends (power returns) | none | The same for `outage_end_warning` |
 | Use the backup source | on | Take the schedule from the mirror when DTEK can't be reached. Not offered for an entry without an address, where the mirror is the only source |
 | Show possible outages in the calendar | on | Fill the next 7 days without an actual schedule with the weekly schedule of possible outages, while DTEK shows that schedule on its website |
+| Other groups of the address in the schedule | Main group only | What the entities, events and the `…_outages` calendar follow when there are several groups: the main one, an outage of any group, or an outage of all groups (of some, as a possible outage), see [Several groups at one address](#several-groups-at-one-address) |
+| Leave out groups | none | Groups DTEK lists for the house that are not followed. Only for an entry with an address |
+| Other groups | none | Groups followed besides the main one. Only for an entry without an address |
 | Language of entity names | Українська | Language of the entity names and calendar events (Ukrainian, English or Russian), whatever the language of Home Assistant. Entity IDs stay in English |
 
 The entry reloads by itself after saving.
@@ -121,10 +157,11 @@ Each entry creates one device:
 
 | Entity | State |
 |---|---|
-| `sensor.…_group` | Group, e.g. `3.1`. Attributes: `group_id` (`GPV3.1`), `groups_at_address`, `manual`, the address, `external_operator` |
+| `sensor.…_group` | Main group, e.g. `3.1`. Attributes: `group_id` (`GPV3.1`), `groups_at_address`, `extra_groups` (the other groups followed), `groups_mode` (`main` / `any` / `all`; the mode in effect, so `main` while there are no other groups), `manual`, the address, `external_operator` |
+| `sensor.…_groups_status` | Which groups of the address are off now, each by its own schedule: `none`, `main` (the main group only), `main_some` / `main_all` (the main and some / all other groups), `others_some` / `others_all` (only some / all other groups). Attributes: `groups_off`, `main_group`, `extra_groups`, `level` (a number 0–5: `none`, `others_some`, `others_all`, `main`, `main_some`, `main_all`), `today` and `tomorrow` — the whole day as runs `{start, end, state, level, groups}` (`null` until the day has a schedule) |
 | `sensor.…_next_outage` | Start of the next scheduled outage (timestamp). Attributes: `end`, `duration_minutes` |
 | `sensor.…_outage_end` | End of the outage in progress; `unknown` when there is none |
-| `sensor.…_outages_today` | Scheduled outage time today, hours. Attributes: `outages_text` (`12:00–14:00, 18:00–20:30`), `outages`, `possible_text`, `schedule`, `published` |
+| `sensor.…_outages_today` | Scheduled outage time today, hours. Attributes: `outages_text` (`12:00–14:00, 18:00–20:30`), `outages`, `possible_text`, `schedule`, `published`, `groups` (the outages of every group alone, the main one first: `{"3.2": "06:00–07:30", "5.1": "07:00–11:00"}`) |
 | `sensor.…_outages_tomorrow` | The same for tomorrow; `unknown` until DTEK publishes it |
 | `sensor.…_schedule_updated` | When DTEK last changed the schedule. Attributes: `version`, `source` (`dtek` / `mirror` / `storage`) |
 | `sensor.…_address_status` | What DTEK reports for the house: `none` (no outage), `stabilization`, `emergency`, `planned` or `other`. Attributes: `reason`, `start`, `end`, `active` (now between start and end), `external_operator`. `unavailable` when DTEK itself can't be reached |
@@ -134,11 +171,12 @@ Each entry creates one device:
 | `binary_sensor.…_scheduled_outage` | `on` (shown as *Problem*) during a scheduled outage. Attributes: `start`, `end`, `next_start`, `next_end` |
 | `binary_sensor.…_address_outage` | `on` (shown as *Problem*) while an outage DTEK reports for the house lasts: stabilization, emergency or planned works, with its own start and end. Attributes: `reason`, `kind`, `start`, `end`. `unavailable` when DTEK itself can't be reached |
 | `calendar.…_outages` | Scheduled outages, possible outages and non-stabilization works reported for the address |
+| `calendar.…_other_groups` | Outages and possible outages of the other groups of the address, each named with its group. Empty while there is one group |
 | `event.…_outage_events` | Every event below (`event_type` is the event type, attributes are its data) |
 
 An entry without an address has no `address_status`, `estimated_restoration` and `address_outage`.
 
-The entities computed from the schedule (`next_outage`, `outage_end`, `outages_today`, `outages_tomorrow`, `scheduled_outage`, the calendar) have two more attributes:
+The entities computed from the schedule (`groups_status`, `next_outage`, `outage_end`, `outages_today`, `outages_tomorrow`, `scheduled_outage`, the calendars) have two more attributes:
 
 - `data_status`: `current` when the last update got the schedule from DTEK or the mirror, `stale` when no source answered and the entities work on what is stored;
 - `last_verified_at`: when a source last confirmed the schedule.
@@ -157,16 +195,19 @@ Every event has `type`, `group` (`GPV3.1`), `group_name` (`3.1`), `settlement`, 
 |---|---|---|
 | `schedule_published` | A day got its schedule for the first time (usually tomorrow, in the evening) | `date`, `day` (`today` / `tomorrow` / `other`), `outages` (`[{start, end}]`), `outages_text`, `outage_minutes`, `possible`, `schedule`, `schedule_updated`, `source` |
 | `schedule_changed` | The schedule of a day changed from now on | the same, plus `previous_outages`, `previous_outages_text`, `previous_outage_minutes` |
-| `outage_warning` | N minutes before a scheduled outage starts, once for each ticked time, or at once (a single event) if a new outage starts sooner | `start`, `end`, `duration_minutes`, `minutes` (left) |
-| `outage_end_warning` | N minutes before a scheduled outage ends and the power returns, once for each ticked time (not for a time longer than the outage) | `start`, `end`, `duration_minutes`, `minutes` (left) |
-| `outage_started` | A scheduled outage starts | `start`, `end`, `duration_minutes` |
-| `outage_ended` | A scheduled outage ends | `start`, `end`, `duration_minutes`, `next_start`, `next_end` |
+| `outage_warning` | N minutes before a scheduled outage starts, once for each ticked time, or at once (a single event) if a new outage starts sooner | `start`, `end`, `duration_minutes`, `minutes` (left), `groups` |
+| `possible_outage_warning` | The same for a possible outage that starts while the power is on (a possible outage straight after an outage gets none) | `start`, `end`, `duration_minutes`, `minutes` (left), `groups` |
+| `outage_end_warning` | N minutes before a scheduled outage ends and the power returns, once for each ticked time (not for a time longer than the outage) | `start`, `end`, `duration_minutes`, `minutes` (left), `groups` |
+| `outage_started` | A scheduled outage starts | `start`, `end`, `duration_minutes`, `groups` |
+| `outage_ended` | A scheduled outage ends | `start`, `end`, `duration_minutes`, `groups`, `next_start`, `next_end` |
 | `address_outage` | DTEK reports an outage for the house, changes its end, or clears it | `status` (`new` / `updated` / `cleared`), `reason`, `kind` (`stabilization` / `emergency` / `planned` / `other`), `start`, `end`, `previous_end` |
 | `group_changed` | DTEK moved the house to another group | `previous_group`, `previous_group_name` |
+| `groups_changed` | DTEK added a group for the house or no longer lists one | `added`, `removed`, `extra_groups` (group names, e.g. `["4.2"]`) |
 
 Rules:
 
 - **First run**: the current state is recorded silently, no schedule events.
+- **Combined groups**: the schedule, outage and warning events are about the combined schedule, and their `group` is the main group. `groups` has the names of the groups off at that time (`["3.1", "5.1"]`); without combining, only the main one. A group added or dropped that changes the combined schedule gives `groups_changed` followed by `schedule_changed`.
 - **Changes in the past only** (DTEK rewrites a finished half-hour) fire nothing.
 - **DTEK hides the schedule of the day** (the page stops showing the table): the rest of the day and the following days are cleared and `schedule_changed` fires with no outages. When the table is back, the integration asks for the whole schedule at once and another `schedule_changed` fires.
 - **After a restart**, changes published while Home Assistant was down are announced. Events wait until Home Assistant has started, so automations receive them.
@@ -177,7 +218,7 @@ Rules:
 | Service | Description |
 |---|---|
 | `dtek_krem_outages.refresh` | Update now. `config_entry_id` is optional; fails when no source answered |
-| `dtek_krem_outages.get_schedule` | Returns `{entries: [{group, days: {date: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, address_outage, source, connection, data_status, publication, ...}]}` |
+| `dtek_krem_outages.get_schedule` | Returns `{entries: [{group, extra_groups, groups_mode, days: {date: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, groups: {GPV3.1: {group_name, days, weekly}, ...}, address_outage, source, connection, data_status, publication, ...}]}`. `days` and `weekly` are the schedule the entities show, `groups` has every group alone |
 
 ## Examples
 
@@ -338,6 +379,71 @@ content: |
 
 For a week view, use the standard **Calendar** card with `calendar.home_outages`.
 
+### Groups status bar
+
+When the address has several groups, `sensor.…_groups_status` on a **History graph** card shows when the main group alone was off, the main one with the others, or only the others:
+
+```yaml
+type: history-graph
+title: Outages by group
+hours_to_show: 48
+entities:
+  - entity: sensor.home_groups_status
+    name: Groups
+```
+
+This card shows only what already happened and picks the colors itself.
+
+### Schedule by group
+
+A **Markdown** card with the `today` and `tomorrow` attributes shows the current period as a colored block of its own (how long it still lasts and until when), and below it the next runs of today and tomorrow: 🌕 power on, 🌗 maybe off (some groups off), 🌑 power off (all groups). Runs that are over disappear by themselves.
+
+```yaml
+type: markdown
+content: |
+  {%- set s = 'sensor.home_groups_status' %}
+  {%- set on, maybe, off = '🌕', '🌗', '🌑' %}
+  {%- set mark = {'none': on ~ ' **power on**', 'main_all': off ~ ' **power off**'} %}
+  {%- set label = {'others_some': 'some other groups', 'others_all': 'other groups only',
+                   'main': 'main group only', 'main_some': 'main and some other groups',
+                   'main_all': 'all groups'} %}
+  {%- set alert = {'none': ('success', on ~ ' Power on now'),
+                   'main_all': ('error', off ~ ' Power off now')} %}
+  {%- set ns = namespace(cur=none) %}
+  {%- for r in (state_attr(s, 'today') or []) + (state_attr(s, 'tomorrow') or []) %}
+    {%- if as_datetime(r.start) <= now() < as_datetime(r.end) %}{% set ns.cur = r %}{% endif %}
+  {%- endfor %}
+  {%- if ns.cur %}
+  {%- set r = ns.cur %}
+  {%- set type, title = alert.get(r.state, ('warning', maybe ~ ' Power maybe off now')) %}
+  {%- set left = ((as_datetime(r.end) - now()).total_seconds() // 60) | int %}
+  {%- set end = '24:00' if r.end[11:16] == '00:00' else r.end[11:16] %}
+  <ha-alert alert-type="{{ type }}" title="{{ title }}">
+  until <b>{{ end }}</b> · {% if left >= 60 %}{{ left // 60 }} h {% endif %}{{ left % 60 }} min left{% if r.state in label %} · {{ label[r.state] }}{% endif %}{% if r.groups %} · {{ r.groups | join(', ') }}{% endif %}
+  </ha-alert>
+  {%- endif %}
+
+  {% for key, title in [('today', 'Later today'), ('tomorrow', 'Tomorrow')] %}
+  {%- set all_runs = state_attr(s, key) %}
+  **{{ title }}**{% if all_runs %} · 📅 {{ all_runs[0].start[8:10] }}.{{ all_runs[0].start[5:7] }}{% endif %}
+
+  {% if not all_runs -%}
+  not published yet
+  {%- else -%}
+  {%- for r in all_runs if as_datetime(r.start) > now() %}
+  {%- set end = '24:00' if r.end[11:16] == '00:00' else r.end[11:16] %}
+  `{{ r.start[11:16] }}–{{ end }}` {{ mark.get(r.state, maybe ~ ' **maybe off**') }}{% if r.state in label %} · {{ label[r.state] }}{% endif %}{% if r.groups %} · {{ r.groups | join(', ') }}{% endif %}<br>
+  {%- else -%}
+  no more changes
+  {%- endfor %}
+  {%- endif %}
+
+  {% endfor -%}
+  <sub>{{ on }} power on · {{ maybe }} maybe off (some groups off) · {{ off }} power off (all groups)</sub>
+```
+
+The marks are on the second line of the template; `'🟡', '🔶', '⚫'` work too, for example. "Maybe off" here means some of the groups are off, as in the "Outage when all groups are off, possible outage when some are" mode.
+
 ## Troubleshooting
 
 | What you see | What to do |
@@ -349,6 +455,7 @@ For a week view, use the standard **Calendar** card with `calendar.home_outages`
 | No possible outages in the calendar | DTEK doesn't show the weekly schedule right now (`weekly_schedule_shown: false` on `sensor.…_dtek_connection`), or the "Show possible outages" option is off |
 | The schedule suddenly says "no outages" | If `daily_schedule_shown` is `false`, DTEK hid the schedule on its website; the integration shows it again as soon as it is back |
 | `external_operator: true` | DTEK says another operator serves the house, and its schedule may not apply to the address |
+| The "Other groups" calendar or the combined schedule has a group that isn't yours | Tick it in the "Leave out groups" option |
 
 ## Diagnostics
 
@@ -359,7 +466,8 @@ For a week view, use the standard **Calendar** card with `calendar.home_outages`
 - The integration depends on the DTEK website. If DTEK changes the endpoint or puts it behind the anti-bot challenge too, the schedule still comes from the mirror, but the address data (group detection, `address_outage`) stops until the integration is updated.
 - The mirror updates about every 5 minutes and can lag behind DTEK.
 - The schedule has half-hour precision, like on the DTEK website. On DST change days the missing or repeated hour follows the wall clock.
-- One group per entry. If the house has several groups (entrances on different lines), choose yours; add several entries for several groups.
+- Each address can be added only once, so the other groups of a house are followed in the same entry, not as entries of their own. The other groups have no sensors of their own: they are in the `…_other_groups` calendar, the attributes and `get_schedule`, and the "Other groups of the address in the schedule" option turns the sensors to all groups.
+- In the "any group" mode the schedule takes the worst of all groups. If your flat is fed by one line, it shows the outages of the other lines too.
 - Only DTEK KREM (Kyiv region). Kyiv city is served by DTEK KEM / Yasno, which this integration does not cover.
 
 ## Comparison with other integrations
@@ -375,9 +483,9 @@ Two more Home Assistant integrations cover DTEK KREM. The comparison is based on
 | Hourly schedule of the group | yes, 7 days of history | yes, 8 days ahead | no, only outages at the address |
 | Weekly schedule of possible outages | yes, when DTEK shows it | yes, when DTEK shows it | no |
 | Outages at the address | kind, reason, start, estimated restoration | kind, description, start, end | reason, next outage, restoration |
-| House with several groups | a step to choose your group | all groups together, each calendar event knows its own | the first group listed |
+| House with several groups | the main group to choose, the others in a calendar of their own and, if wanted, in the combined schedule (any or all groups) | all groups together, each calendar event knows its own | the first group listed |
 | Sensors switch | at the exact start and end of a scheduled outage | from the address status, on every poll (5 min) | on every poll (15 min) |
-| Events and warnings | 8 event types, warnings N min before the start and the end | none | none |
+| Events and warnings | 10 event types, warnings N min before an outage, a possible outage and the end of an outage | none | none |
 | Services | `refresh`, `get_schedule` | none | none |
 | When DTEK doesn't answer | keeps working on the stored schedule, `data_status: stale`, mirror | "live" calendars are empty, a separate "last known schedule" calendar | entities become unavailable |
 | Setup without access to DTEK | yes, by group only (schedule from the mirror) | no | yes, manual group entry |
@@ -403,6 +511,7 @@ Version 0.1.3 brought over ideas (not code) from both projects:
   - the DTEK connection sensor and the `data_status` / `last_verified_at` attributes;
   - a longer interval after failures, with random jitter;
   - separate sensors for the address status and the estimated restoration;
+  - the groups of the house besides the chosen one, with the group named in every calendar event (in version 0.1.5);
 - from DTEK Outages:
   - an entry by group only when DTEK is unavailable;
   - house numbers found regardless of case, spaces and Latin letters;
@@ -412,7 +521,6 @@ Deliberately left out:
 
 - **Imitating a browser for other operators.** This integration won't get around the anti-bot challenge.
 - **The personal account.** It would mean storing the phone number and password of the account.
-- **Several groups in one entry.** A flat is fed by one line; add several entries if you need several groups.
 
 ## Attribution
 

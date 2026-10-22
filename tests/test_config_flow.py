@@ -20,8 +20,11 @@ from custom_components.dtek_krem_outages.config_flow import (
     street_choices,
 )
 from custom_components.dtek_krem_outages.const import (
+    CONF_EXCLUDED_GROUPS,
+    CONF_EXTRA_GROUPS,
     CONF_GROUP,
     CONF_GROUP_MANUAL,
+    CONF_GROUPS_MODE,
     CONF_HOUSE,
     CONF_LANGUAGE,
     CONF_SETTLEMENT,
@@ -234,6 +237,7 @@ async def test_house_with_several_groups(
     result = await submit(hass, result, {CONF_GROUP: "GPV4.2"})
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == "Дача"
+    assert result["options"][CONF_GROUPS_MODE] == "main"
     assert result["data"][CONF_GROUP] == "GPV4.2"
     assert result["data"][CONF_GROUP_MANUAL] is True
 
@@ -318,6 +322,9 @@ async def test_options_flow_reloads(
 
     result = await hass.config_entries.options.async_init(mock_config_entry.entry_id)
     assert result["type"] is FlowResultType.FORM
+    assert CONF_EXCLUDED_GROUPS in fields_of(result)
+    assert CONF_EXTRA_GROUPS not in fields_of(result)
+    assert len(options_of(result, CONF_EXCLUDED_GROUPS)) == 12
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
@@ -326,6 +333,8 @@ async def test_options_flow_reloads(
             CONF_WARN_END: ["30"],
             CONF_USE_MIRROR: False,
             CONF_SHOW_POSSIBLE: False,
+            CONF_GROUPS_MODE: "all",
+            CONF_EXCLUDED_GROUPS: ["GPV5.1", "GPV4.2"],
             CONF_LANGUAGE: "en",
         },
     )
@@ -337,6 +346,9 @@ async def test_options_flow_reloads(
         CONF_WARN_END: [30],
         CONF_USE_MIRROR: False,
         CONF_SHOW_POSSIBLE: False,
+        CONF_GROUPS_MODE: "all",
+        CONF_EXCLUDED_GROUPS: ["GPV4.2", "GPV5.1"],
+        CONF_EXTRA_GROUPS: [],
         CONF_LANGUAGE: "en",
     }
     coordinator = mock_config_entry.runtime_data
@@ -346,6 +358,8 @@ async def test_options_flow_reloads(
     assert coordinator.warn_end == (timedelta(minutes=30),)
     assert not coordinator.use_mirror
     assert coordinator.language == "en"
+    assert coordinator.groups_mode == "all"
+    assert coordinator.excluded_groups == {"GPV4.2", "GPV5.1"}
 
 
 async def test_forms_reach_frontend(
@@ -387,12 +401,16 @@ async def test_forms_reach_frontend(
             CONF_WARN_END: [],
             CONF_USE_MIRROR: True,
             CONF_SHOW_POSSIBLE: True,
+            CONF_GROUPS_MODE: "all",
+            CONF_EXCLUDED_GROUPS: ["GPV3.1"],
             CONF_LANGUAGE: "uk",
         },
     )
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_WARN_START] == [60, 5]
     assert entry.options[CONF_WARN_END] == []
+    assert entry.options[CONF_GROUPS_MODE] == "all"
+    assert entry.options[CONF_EXCLUDED_GROUPS] == ["GPV3.1"]
 
 
 async def test_reconfigure(
@@ -522,6 +540,10 @@ async def test_options_of_group_only_entry(
     await setup_entry(hass, entry)
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert CONF_USE_MIRROR not in fields_of(result)
+    assert CONF_EXCLUDED_GROUPS not in fields_of(result)
+    choices = [o["value"] for o in options_of(result, CONF_EXTRA_GROUPS)]
+    assert len(choices) == 11
+    assert GROUP not in choices
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
@@ -529,12 +551,15 @@ async def test_options_of_group_only_entry(
             CONF_WARN_START: [],
             CONF_WARN_END: [],
             CONF_SHOW_POSSIBLE: True,
+            CONF_EXTRA_GROUPS: ["GPV5.2", "GPV4.2"],
             CONF_LANGUAGE: "uk",
         },
     )
     await hass.async_block_till_done()
     assert entry.options[CONF_UPDATE_INTERVAL] == 7
     assert entry.options[CONF_USE_MIRROR] is True
+    assert entry.options[CONF_EXTRA_GROUPS] == ["GPV4.2", "GPV5.2"]
+    assert entry.runtime_data.data.extra_groups == ["GPV4.2", "GPV5.2"]
 
 
 async def test_menu_reaches_frontend(

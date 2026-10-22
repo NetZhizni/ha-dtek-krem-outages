@@ -13,7 +13,17 @@ from custom_components.dtek_krem_outages.diagnostics import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 
-from .conftest import ENTRY_ID, GROUP, TODAY, TOMORROW, FakeDtek, setup_entry, slots
+from .conftest import (
+    ENTRY_ID,
+    GROUP,
+    HOUSE,
+    TODAY,
+    TOMORROW,
+    FakeDtek,
+    make_house,
+    setup_entry,
+    slots,
+)
 
 
 async def test_get_schedule(
@@ -100,3 +110,25 @@ async def test_diagnostics(
     assert result["entry"]["data"]["group"] == GROUP
     assert result["state"]["street"] == "**REDACTED**"
     assert result["state"]["days"][TODAY.isoformat()]["outage_minutes"] == 270
+
+
+async def test_get_schedule_other_groups(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Every followed group is in the response with its own schedule."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    await setup_entry(hass, mock_config_entry)
+    response = await hass.services.async_call(
+        DOMAIN, "get_schedule", {}, blocking=True, return_response=True
+    )
+    entry = response["entries"][0]
+    assert entry["groups_at_address"] == [GROUP, "GPV4.2"]
+    assert entry["extra_groups"] == ["GPV4.2"]
+    assert entry["groups_mode"] == "main"
+    assert list(entry["groups"]) == [GROUP, "GPV4.2"]
+    other = entry["groups"]["GPV4.2"]
+    assert other["group_name"] == "4.2"
+    assert other["days"][TODAY.isoformat()]["outages_text"] == "08:00–12:00"
+    assert sorted(other["weekly"]) == ["1", "2", "3", "4", "5", "6", "7"]
+    main = entry["groups"][GROUP]["days"][TODAY.isoformat()]
+    assert main == entry["days"][TODAY.isoformat()]

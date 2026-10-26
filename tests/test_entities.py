@@ -319,6 +319,51 @@ async def test_address_outage_sensor(
     assert state(hass, "binary_sensor", "address_outage").state == "off"
 
 
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en"}])
+async def test_calendar_keeps_address_outages(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """Address works DTEK stopped reporting stay in the calendar."""
+    fake_dtek.houses[HOUSE] = make_house(
+        reason="Аварійні ремонтні роботи",
+        start="09:50 18.10.2026",
+        end="13:00 18.10.2026",
+    )
+    await setup_entry(hass, mock_config_entry)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+
+    frozen_now.move_to(kyiv(TODAY, "10:40"))
+    fake_dtek.houses[HOUSE] = make_house(
+        reason="Стабілізаційне відключення",
+        start="10:30 18.10.2026",
+        end="11:00 18.10.2026",
+    )
+    await mock_config_entry.runtime_data.async_refresh()
+    fake_dtek.houses[HOUSE] = make_house()
+    await move_to(hass, frozen_now, kyiv(TODAY, "11:30"))
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+
+    assert state(hass, "binary_sensor", "address_outage").state == "off"
+    address = [
+        (e["summary"], e["start"], e["end"], e["location"])
+        for e in await calendar_events(hass, "outages")
+        if "location" in e
+    ]
+    # The stabilization outage is in the schedule already.
+    assert address == [
+        (
+            "Аварійні ремонтні роботи",
+            "2026-10-18T09:50:00+03:00",
+            "2026-10-18T10:40:00+03:00",
+            TITLE,
+        )
+    ]
+
+
 @pytest.mark.parametrize(
     ("options", "possible_expected"),
     [({}, True), ({CONF_SHOW_POSSIBLE: False}, False)],

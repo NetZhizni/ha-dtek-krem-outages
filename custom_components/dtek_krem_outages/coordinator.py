@@ -22,12 +22,16 @@ is no longer listed is dropped after a few answers without it. The schedule
 the entities show follows ``groups_mode``: the main group alone, the worst of
 all groups slot by slot, or an outage where all groups are off and a possible
 outage where some are. It is merged like a schedule from DTEK.
+
+The outage DTEK reports for the house is replaced by every answer. One DTEK
+stops reporting is kept for the calendar as it went, since DTEK often adds
+and removes them after the fact.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, tzinfo
 import logging
 import math
@@ -211,6 +215,8 @@ class DtekData:
     fact_updated_at: datetime | None = None
     source: str = SOURCE_STORAGE
     address_outage: AddressOutage | None = None
+    # Outages DTEK reported for the house before, oldest first.
+    address_history: list[AddressOutage] = field(default_factory=list)
     address_ok: bool = False
     fetch_ok: bool = False
     last_success: datetime | None = None
@@ -307,6 +313,8 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._fact_updated_at: datetime | None = None
         self._source = SOURCE_STORAGE
         self._address_outage: AddressOutage | None = None
+        # Outages DTEK no longer reports, kept for HISTORY_DAYS days.
+        self._address_history: list[AddressOutage] = []
         self._address_ok = False
         self._fetch_ok = False
         self._groups_at_address: list[str] = []
@@ -380,6 +388,14 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._last_dtek_success = _parse_iso(stored.get("last_dtek_success"))
         self._publication = Publication.from_dict(stored.get("publication"))
         self._external_operator = bool(stored.get("external_operator"))
+        history = stored.get("address_history")
+        self._address_history = [
+            outage
+            for raw in (history if isinstance(history, list) else [])
+            if (outage := AddressOutage.from_dict(raw)) is not None
+            and outage.start is not None
+            and outage.end is not None
+        ]
         if stored.get("group") != self.group:
             today, _ = slot_at(dt_util.utcnow(), self.tz)
             self._days = {day: s for day, s in self._days.items() if day <= today}
@@ -450,6 +466,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             "address_outage": self._address_outage.as_dict()
             if self._address_outage
             else None,
+            "address_history": [o.as_dict() for o in self._address_history],
             "groups_at_address": self._groups_at_address,
             "external_operator": self._external_operator,
             "publication": self._publication.as_dict(),
@@ -471,6 +488,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         dtek_ok = mirror_ok = False
         self._blocked = False
         followed = self.followed_groups
+        history = self._address_history
         if self.has_address:
             try:
                 fact, preset = await self._async_fetch_dtek()
@@ -504,6 +522,8 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         # The groups may have changed even without a new schedule.
         changed = self._update_days(now) or changed
         changed = changed or self.followed_groups != followed
+        # An outage that went to the history must survive a crash too.
+        changed = changed or self._address_history != history
         self._fetch_ok = dtek_ok or mirror_ok
         if self._fetch_ok:
             self._last_success = now
@@ -779,7 +799,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
                 self.house,
             )
         self._external_operator = external
-        self._update_address_outage(outage)
+        self._update_address_outage(outage, dt_util.utcnow())
         # A missing house or an empty list is not taken as the house losing
         # its groups: the groups known stay.
         if not groups:
@@ -873,8 +893,11 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             {"previous_group": previous, "previous_group_name": group_name(previous)},
         )
 
-    def _update_address_outage(self, outage: AddressOutage | None) -> None:
+    def _update_address_outage(
+        self, outage: AddressOutage | None, now: datetime
+    ) -> None:
         old, self._address_outage = self._address_outage, outage
+        self._keep_address_outage(old, outage, now)
         if not self._has_baseline or old == outage:
             return
         if outage is None:
@@ -896,6 +919,29 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             },
         )
 
+    def _keep_address_outage(
+        self, old: AddressOutage | None, new: AddressOutage | None, now: datetime
+    ) -> None:
+        """Move an outage DTEK stopped reporting to the history.
+
+        An outage is identified by its start. One that had not started was
+        called off and is dropped; one still going on ends when DTEK stopped
+        reporting it. An outage DTEK reports again leaves the history.
+        """
+        history = self._address_history
+        if new is not None and new.start is not None:
+            history = [o for o in history if o.start != new.start]
+        if (
+            old is not None
+            and old.start is not None
+            and old.start < now
+            and (new is None or new.start != old.start)
+        ):
+            end = (now if old.end is None else min(old.end, now)).astimezone(self.tz)
+            history = [o for o in history if o.start != old.start]
+            history.append(replace(old, end=end))
+        self._address_history = sorted(history, key=lambda o: o.start or now)
+
     def _prune(self, now: datetime) -> None:
         today, _ = slot_at(now, self.tz)
         oldest = today - timedelta(days=HISTORY_DAYS)
@@ -904,6 +950,11 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             group: {day: s for day, s in days.items() if day >= oldest}
             for group, days in self._group_days.items()
         }
+        self._address_history = [
+            o
+            for o in self._address_history
+            if o.end is not None and o.end.astimezone(self.tz).date() >= oldest
+        ]
         cutoff = now - timedelta(days=1)
         # Keys are ``<kind>@<minutes>@<moment>``; older ones are the bare moment.
         self._warned = {
@@ -929,6 +980,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             fact_updated_at=self._fact_updated_at,
             source=self._source,
             address_outage=self._address_outage,
+            address_history=list(self._address_history),
             address_ok=self._address_ok,
             fetch_ok=self._fetch_ok,
             last_success=self._last_success,
@@ -1248,6 +1300,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             "address_outage": data.address_outage.as_dict()
             if data.address_outage
             else None,
+            "address_history": [o.as_dict() for o in data.address_history],
         }
 
 

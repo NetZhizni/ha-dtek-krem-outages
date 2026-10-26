@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] - 2026-10-26
+
+### Added
+- Outages DTEK reported for the house stay in the `…_outages` calendar for 7 days after DTEK stops showing them, since DTEK often adds and removes them after the fact. One removed while it was going on ends when DTEK removed it, one removed after its end keeps its end, one called off before it started is not kept, and one DTEK shows again is current again. The history survives restarts.
+- `address_history` in the `get_schedule` response and the diagnostics.
+
+### Changed
+- README (Ukrainian and English): a section on the address works in the calendar; both Markdown card examples show the emergency, planned or other works reported for the house while they last or when they are ahead.
+- README (Ukrainian and English): the integration is in the HACS default list, so the badge says so and installing it no longer needs adding the repository by hand.
+
 ## [0.1.5] - 2026-10-22
 
 ### Added

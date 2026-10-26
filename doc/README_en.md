@@ -2,7 +2,7 @@
 
 # DTEK KREM Outages
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz/)
 [![Validate](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/validate.yml/badge.svg)](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/validate.yml)
 [![Tests](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/tests.yml/badge.svg)](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/tests.yml)
 
@@ -60,11 +60,10 @@ After a failed request the update interval doubles (5 → 10 → 15 min by defau
 
 [![Open your Home Assistant instance and open the DTEK KREM Outages repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=NetZhizni&repository=ha-dtek-krem-outages&category=integration)
 
-Or add the repository by hand:
+Or find it in HACS yourself, there's no need to add the repository by hand:
 
-1. HACS → ⋮ → **Custom repositories** → add `https://github.com/NetZhizni/ha-dtek-krem-outages` with type **Integration**.
-2. In the HACS search box, type **DTEK KREM Outages** → open it → **Download**.
-3. Restart Home Assistant.
+1. Open HACS, type **DTEK KREM Outages** in the search box → open it → **Download**.
+2. Restart Home Assistant.
 
 ### Method 2: Git clone from GitHub
 
@@ -170,7 +169,7 @@ Each entry creates one device:
 | `sensor.…_dtek_connection` | What answered the last update (diagnostic): `ok` (DTEK), `mirror` (only the mirror) or `offline` (nothing, stored data in use). Attributes: `last_success`, `last_dtek_success`, `consecutive_failures`, `update_interval_minutes`, `blocked` (DTEK answered with the anti-bot challenge), `last_error`, `daily_schedule_shown`, `weekly_schedule_shown` |
 | `binary_sensor.…_scheduled_outage` | `on` (shown as *Problem*) during a scheduled outage. Attributes: `start`, `end`, `next_start`, `next_end` |
 | `binary_sensor.…_address_outage` | `on` (shown as *Problem*) while an outage DTEK reports for the house lasts: stabilization, emergency or planned works, with its own start and end. Attributes: `reason`, `kind`, `start`, `end`. `unavailable` when DTEK itself can't be reached |
-| `calendar.…_outages` | Scheduled outages, possible outages and non-stabilization works reported for the address |
+| `calendar.…_outages` | Scheduled outages, possible outages and non-stabilization works reported for the address. Works DTEK no longer shows stay in the calendar as they went for 7 days, like the past schedule, see [Address works in the calendar](#address-works-in-the-calendar) |
 | `calendar.…_other_groups` | Outages and possible outages of the other groups of the address, each named with its group. Empty while there is one group |
 | `event.…_outage_events` | Every event below (`event_type` is the event type, attributes are its data) |
 
@@ -184,6 +183,17 @@ The entities computed from the schedule (`groups_status`, `next_outage`, `outage
 All times are Kyiv time. Sensors switch at the exact moment an outage starts or ends and at midnight, not only on updates.
 
 When DTEK reports several outages for a house at once, the most severe one is shown (emergency, then stabilization, then planned works). If DTEK marks the house as served by another operator, `external_operator` is `true` and a warning goes to the log: the DTEK schedule may not apply to such a house.
+
+### Address works in the calendar
+
+DTEK shows only the current outage of the house and often adds or removes one after the fact. So an outage DTEK stops showing goes to the history and stays in the `…_outages` calendar for 7 days:
+
+- one removed while it was going on ends when DTEK removed it (to within the update interval);
+- one removed after its end keeps the end DTEK gave;
+- one called off before it started (planned works moved, for example) is not added;
+- when DTEK shows an outage with the same start again, it is current again, with no duplicate in the calendar.
+
+The history survives restarts and is in `address_history` of the `get_schedule` service. Stabilization outages are not added to the calendar: the schedule already has them.
 
 ## Events
 
@@ -218,7 +228,7 @@ Rules:
 | Service | Description |
 |---|---|
 | `dtek_krem_outages.refresh` | Update now. `config_entry_id` is optional; fails when no source answered |
-| `dtek_krem_outages.get_schedule` | Returns `{entries: [{group, extra_groups, groups_mode, days: {date: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, groups: {GPV3.1: {group_name, days, weekly}, ...}, address_outage, source, connection, data_status, publication, ...}]}`. `days` and `weekly` are the schedule the entities show, `groups` has every group alone |
+| `dtek_krem_outages.get_schedule` | Returns `{entries: [{group, extra_groups, groups_mode, days: {date: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, groups: {GPV3.1: {group_name, days, weekly}, ...}, address_outage, address_history, source, connection, data_status, publication, ...}]}`. `days` and `weekly` are the schedule the entities show, `groups` has every group alone, `address_history` the outages of the address DTEK no longer shows (7 days) |
 
 ## Examples
 
@@ -364,6 +374,15 @@ content: |
   {{ state_attr('sensor.home_outages_tomorrow', 'outages_text') or 'no outages' }}
   {%- else %}not published yet{% endif %}
 
+  {% set a = 'sensor.home_address_status' -%}
+  {% set a_start, a_end = state_attr(a, 'start'), state_attr(a, 'end') -%}
+  {% if states(a) in ['emergency', 'planned', 'other']
+        and (state_attr(a, 'active') or (a_start and as_datetime(a_start) > now())) -%}
+  🚧 **{{ state_attr(a, 'reason') }}**
+  {%- if not state_attr(a, 'active') %} from {{ as_timestamp(a_start) | timestamp_custom('%d.%m %H:%M') }}{% endif %}
+  {%- if a_end %} until {{ as_timestamp(a_end) | timestamp_custom('%d.%m %H:%M') }}{% else %}, end unknown{% endif %}
+  {%- endif %}
+
   {% if is_state('binary_sensor.home_scheduled_outage', 'on') -%}
   ⚫ Power back at {{ as_timestamp(states('sensor.home_outage_end')) | timestamp_custom('%H:%M') }}
   {%- elif states('sensor.home_next_outage') not in ['unknown', 'unavailable'] -%}
@@ -377,7 +396,9 @@ content: |
   <sub>Data: DTEK KREM, updated {{ as_timestamp(states('sensor.home_schedule_updated')) | timestamp_custom('%d.%m %H:%M') }}</sub>
 ```
 
-For a week view, use the standard **Calendar** card with `calendar.home_outages`.
+Emergency works, planned works and other outages DTEK reports for the house get a 🚧 line of their own while they last or when they are still ahead. Stabilization outages are left out there: the schedule already has them. An entry without an address has no `sensor.home_address_status`, and the line just stays empty.
+
+For a week view, with the address works that are over too, use the standard **Calendar** card with `calendar.home_outages`.
 
 ### Groups status bar
 
@@ -409,6 +430,14 @@ content: |
                    'main_all': 'all groups'} %}
   {%- set alert = {'none': ('success', on ~ ' Power on now'),
                    'main_all': ('error', off ~ ' Power off now')} %}
+  {%- set a = 'sensor.home_address_status' %}
+  {%- set a_start, a_end = state_attr(a, 'start'), state_attr(a, 'end') %}
+  {%- if states(a) in ['emergency', 'planned', 'other']
+        and (state_attr(a, 'active') or (a_start and as_datetime(a_start) > now())) %}
+  <ha-alert alert-type="{{ 'error' if state_attr(a, 'active') else 'info' }}" title="🚧 {{ state_attr(a, 'reason') }}">
+  {% if not state_attr(a, 'active') %}from <b>{{ as_timestamp(a_start) | timestamp_custom('%d.%m %H:%M') }}</b> {% endif %}{% if a_end %}until <b>{{ as_timestamp(a_end) | timestamp_custom('%d.%m %H:%M') }}</b>{% else %}end unknown{% endif %} · at the address, apart from the group schedule
+  </ha-alert>
+  {%- endif %}
   {%- set ns = namespace(cur=none) %}
   {%- for r in (state_attr(s, 'today') or []) + (state_attr(s, 'tomorrow') or []) %}
     {%- if as_datetime(r.start) <= now() < as_datetime(r.end) %}{% set ns.cur = r %}{% endif %}
@@ -441,6 +470,8 @@ content: |
   {% endfor -%}
   <sub>{{ on }} power on · {{ maybe }} maybe off (some groups off) · {{ off }} power off (all groups)</sub>
 ```
+
+Above the current period, the works at the address get a block of their own: red while they last, blue when they are still ahead. They don't depend on the group schedule: during emergency works the power is off even when the schedule says the group is on.
 
 The marks are on the second line of the template; `'🟡', '🔶', '⚫'` work too, for example. "Maybe off" here means some of the groups are off, as in the "Outage when all groups are off, possible outage when some are" mode.
 
@@ -482,7 +513,7 @@ Two more Home Assistant integrations cover DTEK KREM. The comparison is based on
 | Backup source | Baskerville42 mirror | none | none |
 | Hourly schedule of the group | yes, 7 days of history | yes, 8 days ahead | no, only outages at the address |
 | Weekly schedule of possible outages | yes, when DTEK shows it | yes, when DTEK shows it | no |
-| Outages at the address | kind, reason, start, estimated restoration | kind, description, start, end | reason, next outage, restoration |
+| Outages at the address | kind, reason, start, estimated restoration; past ones in the calendar for 7 days | kind, description, start, end | reason, next outage, restoration |
 | House with several groups | the main group to choose, the others in a calendar of their own and, if wanted, in the combined schedule (any or all groups) | all groups together, each calendar event knows its own | the first group listed |
 | Sensors switch | at the exact start and end of a scheduled outage | from the address status, on every poll (5 min) | on every poll (15 min) |
 | Events and warnings | 10 event types, warnings N min before an outage, a possible outage and the end of an outage | none | none |

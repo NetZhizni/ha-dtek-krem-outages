@@ -2,7 +2,7 @@
 
 # DTEK KREM Outages
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/docs/faq/custom_repositories)
+[![HACS Default](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://hacs.xyz/)
 [![Validate](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/validate.yml/badge.svg)](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/validate.yml)
 [![Tests](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/tests.yml/badge.svg)](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/tests.yml)
 
@@ -58,11 +58,10 @@
 
 [![Відкрити репозиторій DTEK KREM Outages у HACS вашого Home Assistant.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=NetZhizni&repository=ha-dtek-krem-outages&category=integration)
 
-Або додайте репозиторій вручну:
+Або знайдіть інтеграцію в HACS самі, додавати репозиторій вручну не потрібно:
 
-1. HACS → ⋮ → **Custom repositories** → додайте `https://github.com/NetZhizni/ha-dtek-krem-outages` з типом **Integration**.
-2. У пошуку HACS введіть **DTEK KREM Outages** → відкрийте → **Download**.
-3. Перезапустіть Home Assistant.
+1. Відкрийте HACS і в пошуку введіть **DTEK KREM Outages** → відкрийте → **Download**.
+2. Перезапустіть Home Assistant.
 
 ### Спосіб 2: Git clone з GitHub
 
@@ -168,7 +167,7 @@ cp -r ha-dtek-krem-outages/custom_components/dtek_krem_outages custom_components
 | `sensor.…_dtek_connection` | Що відповіло на останнє оновлення (діагностична): `ok` (ДТЕК), `mirror` (лише дзеркало) або `offline` (нічого, працює збережене). Атрибути: `last_success`, `last_dtek_success`, `consecutive_failures`, `update_interval_minutes`, `blocked` (ДТЕК віддав перевірку від ботів), `last_error`, `daily_schedule_shown`, `weekly_schedule_shown` |
 | `binary_sensor.…_scheduled_outage` | `on` (показується як *Проблема*) під час відключення за графіком. Атрибути: `start`, `end`, `next_start`, `next_end` |
 | `binary_sensor.…_address_outage` | `on` (показується як *Проблема*), поки триває відключення, яке ДТЕК вказує для будинку: стабілізаційне, аварійне чи планові роботи, зі своїми початком і кінцем. Атрибути: `reason`, `kind`, `start`, `end`. `unavailable`, коли недоступний сам ДТЕК |
-| `calendar.…_outages` | Відключення за графіком, можливі відключення й нестабілізаційні роботи за адресою |
+| `calendar.…_outages` | Відключення за графіком, можливі відключення й нестабілізаційні роботи за адресою. Роботи, які ДТЕК перестав показувати, лишаються в календарі такими, якими були, 7 днів, як і минулий графік, див. [Роботи за адресою в календарі](#роботи-за-адресою-в-календарі) |
 | `calendar.…_other_groups` | Відключення й можливі відключення інших черг адреси, кожне з назвою черги. Порожній, коли черга одна |
 | `event.…_outage_events` | Усі події нижче (`event_type` — тип події, атрибути — її дані) |
 
@@ -182,6 +181,17 @@ cp -r ha-dtek-krem-outages/custom_components/dtek_krem_outages custom_components
 Увесь час — київський. Сенсори перемикаються точно в момент початку й кінця відключення та опівночі, а не лише при оновленнях.
 
 Коли ДТЕК вказує для будинку кілька відключень одразу, показується найсерйозніше (аварійне, потім стабілізаційне, потім планові роботи). Якщо ДТЕК позначає будинок як такий, що його обслуговує інший оператор, `external_operator` дорівнює `true`, а в журналі з'являється попередження: графік ДТЕК до такого будинку може не застосовуватися.
+
+### Роботи за адресою в календарі
+
+ДТЕК показує для будинку лише поточне відключення і часто додає чи знімає його заднім числом. Тому відключення, яке ДТЕК перестав показувати, переходить в історію й лишається в календарі `…_outages` на 7 днів:
+
+- зняте, поки воно тривало, закінчується в момент, коли ДТЕК його зняв (з точністю до інтервалу оновлення);
+- зняте після свого кінця лишається з кінцем, який вказував ДТЕК;
+- скасоване до початку (наприклад, перенесені планові роботи) в календар не потрапляє;
+- якщо ДТЕК знову показує відключення з тим самим початком, воно знову стає поточним, без дубля в календарі.
+
+Історія зберігається між перезапусками й доступна в `address_history` сервісу `get_schedule`. Стабілізаційні відключення в календар не потрапляють: вони вже є в графіку.
 
 ## Події
 
@@ -216,7 +226,7 @@ cp -r ha-dtek-krem-outages/custom_components/dtek_krem_outages custom_components
 | Сервіс | Опис |
 |---|---|
 | `dtek_krem_outages.refresh` | Оновити зараз. `config_entry_id` необов'язковий; помилка, якщо не відповіло жодне джерело |
-| `dtek_krem_outages.get_schedule` | Повертає `{entries: [{group, extra_groups, groups_mode, days: {дата: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, groups: {GPV3.1: {group_name, days, weekly}, ...}, address_outage, source, connection, data_status, publication, ...}]}`. `days` і `weekly` — графік, який показують сутності, `groups` — кожна черга окремо |
+| `dtek_krem_outages.get_schedule` | Повертає `{entries: [{group, extra_groups, groups_mode, days: {дата: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, groups: {GPV3.1: {group_name, days, weekly}, ...}, address_outage, address_history, source, connection, data_status, publication, ...}]}`. `days` і `weekly` — графік, який показують сутності, `groups` — кожна черга окремо, `address_history` — відключення за адресою, які ДТЕК уже не показує (за 7 днів) |
 
 ## Приклади
 
@@ -362,6 +372,15 @@ content: |
   {{ state_attr('sensor.home_outages_tomorrow', 'outages_text') or 'без відключень' }}
   {%- else %}ще не опубліковано{% endif %}
 
+  {% set a = 'sensor.home_address_status' -%}
+  {% set a_start, a_end = state_attr(a, 'start'), state_attr(a, 'end') -%}
+  {% if states(a) in ['emergency', 'planned', 'other']
+        and (state_attr(a, 'active') or (a_start and as_datetime(a_start) > now())) -%}
+  🚧 **{{ state_attr(a, 'reason') }}**
+  {%- if not state_attr(a, 'active') %} з {{ as_timestamp(a_start) | timestamp_custom('%d.%m %H:%M') }}{% endif %}
+  {%- if a_end %} до {{ as_timestamp(a_end) | timestamp_custom('%d.%m %H:%M') }}{% else %}, кінець невідомий{% endif %}
+  {%- endif %}
+
   {% if is_state('binary_sensor.home_scheduled_outage', 'on') -%}
   ⚫ Світло з'явиться о {{ as_timestamp(states('sensor.home_outage_end')) | timestamp_custom('%H:%M') }}
   {%- elif states('sensor.home_next_outage') not in ['unknown', 'unavailable'] -%}
@@ -375,7 +394,9 @@ content: |
   <sub>Дані: ДТЕК КРЕМ, оновлено {{ as_timestamp(states('sensor.home_schedule_updated')) | timestamp_custom('%d.%m %H:%M') }}</sub>
 ```
 
-Для перегляду тижня використайте стандартну картку **Календар** з `calendar.home_outages`.
+Аварійні роботи, планові роботи й інші відключення, які ДТЕК вказує для будинку, показуються окремим рядком 🚧, поки тривають або якщо ще попереду. Стабілізаційні відключення там не показуються: вони вже є в графіку. У записі без адреси `sensor.home_address_status` немає, і цей рядок просто порожній.
+
+Для перегляду тижня, разом з роботами за адресою, які вже минули, використайте стандартну картку **Календар** з `calendar.home_outages`.
 
 ### Смуга стану черг
 
@@ -407,6 +428,14 @@ content: |
                    'main_all': 'усі черги'} %}
   {%- set alert = {'none': ('success', on ~ ' Зараз є світло'),
                    'main_all': ('error', off ~ ' Зараз немає світла')} %}
+  {%- set a = 'sensor.home_address_status' %}
+  {%- set a_start, a_end = state_attr(a, 'start'), state_attr(a, 'end') %}
+  {%- if states(a) in ['emergency', 'planned', 'other']
+        and (state_attr(a, 'active') or (a_start and as_datetime(a_start) > now())) %}
+  <ha-alert alert-type="{{ 'error' if state_attr(a, 'active') else 'info' }}" title="🚧 {{ state_attr(a, 'reason') }}">
+  {% if not state_attr(a, 'active') %}з <b>{{ as_timestamp(a_start) | timestamp_custom('%d.%m %H:%M') }}</b> {% endif %}{% if a_end %}до <b>{{ as_timestamp(a_end) | timestamp_custom('%d.%m %H:%M') }}</b>{% else %}кінець невідомий{% endif %} · за адресою, окремо від графіка черг
+  </ha-alert>
+  {%- endif %}
   {%- set ns = namespace(cur=none) %}
   {%- for r in (state_attr(s, 'today') or []) + (state_attr(s, 'tomorrow') or []) %}
     {%- if as_datetime(r.start) <= now() < as_datetime(r.end) %}{% set ns.cur = r %}{% endif %}
@@ -439,6 +468,8 @@ content: |
   {% endfor -%}
   <sub>{{ on }} є світло · {{ maybe }} можливо немає (вимкнена частина черг) · {{ off }} немає світла (усі черги)</sub>
 ```
+
+Над поточним періодом окремим блоком показуються роботи за адресою: червоним, поки тривають, синім, якщо ще попереду. Вони не залежать від графіка черг: під час аварійних робіт світла немає, навіть коли черга за графіком увімкнена.
 
 Позначки — у другому рядку шаблону; наприклад, `'🟡', '🔶', '⚫'` теж підійдуть. «Можливо немає» тут — вимкнена частина черг, як у режимі «Відключення, коли вимкнені всі черги; можливе — коли частина».
 
@@ -480,7 +511,7 @@ content: |
 | Запасне джерело | дзеркало Baskerville42 | немає | немає |
 | Погодинний графік черги | так, історія 7 днів | так, на 8 днів уперед | ні, лише відключення за адресою |
 | Тижневий графік можливих відключень | так, коли ДТЕК його показує | так, коли ДТЕК його показує | ні |
-| Відключення за адресою | тип, причина, початок, орієнтовне відновлення | тип, опис, початок, кінець | причина, наступне відключення, відновлення |
+| Відключення за адресою | тип, причина, початок, орієнтовне відновлення; минулі — у календарі 7 днів | тип, опис, початок, кінець | причина, наступне відключення, відновлення |
 | Будинок із кількома чергами | основна черга на вибір, інші — окремим календарем і за бажанням в об'єднаному графіку (будь-яка або всі черги) | усі черги разом, подія календаря знає свою | перша черга зі списку |
 | Перемикання сенсорів | точно в момент початку й кінця за графіком | за статусом адреси, з кожним опитуванням (5 хв) | з кожним опитуванням (15 хв) |
 | Події й попередження | 10 типів подій, попередження за N хв до відключення, можливого відключення й кінця відключення | немає | немає |

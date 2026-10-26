@@ -452,6 +452,72 @@ async def test_address_outage_events(
     assert outage_events[1]["previous_end"] == "2026-10-18T13:00:00+03:00"
 
 
+async def test_address_outage_history(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """Outages DTEK stops reporting are kept as they went."""
+    emergency = "Аварійні ремонтні роботи"
+    planned = "Планові ремонтні роботи"
+    fake_dtek.houses[HOUSE] = make_house(
+        reason=emergency, start="09:50 18.10.2026", end="13:00 18.10.2026"
+    )
+    await setup_entry(hass, mock_config_entry)
+    coordinator = mock_config_entry.runtime_data
+    assert coordinator.data.address_history == []
+
+    # Cleared while going on: it ends when DTEK stopped reporting it.
+    frozen_now.move_to(kyiv(TODAY, "10:40"))
+    fake_dtek.houses[HOUSE] = make_house(
+        reason=planned, start="09:00 19.10.2026", end="17:00 19.10.2026"
+    )
+    await refresh(hass, mock_config_entry)
+    history = coordinator.data.address_history
+    assert [(o.reason, o.start, o.end) for o in history] == [
+        (emergency, kyiv(TODAY, "09:50"), kyiv(TODAY, "10:40"))
+    ]
+    assert stored(hass_storage)["address_history"] == [
+        {
+            "reason": emergency,
+            "kind": "emergency",
+            "start": "2026-10-18T09:50:00+03:00",
+            "end": "2026-10-18T10:40:00+03:00",
+            "type": "2",
+        }
+    ]
+
+    # Works called off before they started are not kept.
+    fake_dtek.houses[HOUSE] = make_house()
+    await refresh(hass, mock_config_entry)
+    assert len(coordinator.data.address_history) == 1
+
+    # DTEK reports the emergency again: it is current, not history.
+    fake_dtek.houses[HOUSE] = make_house(
+        reason=emergency, start="09:50 18.10.2026", end="14:00 18.10.2026"
+    )
+    await refresh(hass, mock_config_entry)
+    assert coordinator.data.address_history == []
+    assert coordinator.data.address_outage.end == kyiv(TODAY, "14:00")
+
+    # Cleared after its end: the reported end stays.
+    frozen_now.move_to(kyiv(TODAY, "15:00"))
+    fake_dtek.houses[HOUSE] = make_house()
+    await refresh(hass, mock_config_entry)
+    assert [o.end for o in coordinator.data.address_history] == [kyiv(TODAY, "14:00")]
+
+    # It survives a restart and is dropped with the past days of the schedule.
+    assert await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = mock_config_entry.runtime_data
+    assert len(coordinator.data.address_history) == 1
+    frozen_now.move_to(kyiv(TODAY + timedelta(days=8), "10:00"))
+    await refresh(hass, mock_config_entry)
+    assert coordinator.data.address_history == []
+
+
 async def test_missing_house(
     hass: HomeAssistant,
     fake_dtek: FakeDtek,

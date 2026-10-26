@@ -130,7 +130,8 @@ class OutageCalendar(_DtekCalendar):
     The schedule is the one the other entities show: the main group, or all
     groups of the address when they are combined, each event then naming the
     groups off during it. Stabilization outages reported for the address are
-    left out: the schedule already shows them.
+    left out: the schedule already shows them. Works DTEK no longer reports
+    stay as they went, as long as the past days of the schedule.
     """
 
     def __init__(self, coordinator: DtekCoordinator) -> None:
@@ -154,29 +155,27 @@ class OutageCalendar(_DtekCalendar):
         else:
             label = self._label([data.group])
             events = self._schedule_events(data.days, data.preset, label, entry_id)
-        outage = data.address_outage
-        if (
-            outage is not None
-            and outage.kind != OUTAGE_KIND_STABILIZATION
+        location = (
+            f"{coordinator.settlement}, {coordinator.street}, {coordinator.house}"
+            if coordinator.has_address
+            else None
+        )
+        current = [data.address_outage] if data.address_outage else []
+        events.extend(
+            CalendarEvent(
+                start=outage.start,
+                end=outage.end,
+                summary=outage.reason,
+                description=label,
+                location=location,
+                uid=f"{entry_id}-address-{outage.start.isoformat()}",
+            )
+            for outage in [*data.address_history, *current]
+            if outage.kind != OUTAGE_KIND_STABILIZATION
             and outage.start is not None
             and outage.end is not None
             and outage.end > outage.start
-        ):
-            events.append(
-                CalendarEvent(
-                    start=outage.start,
-                    end=outage.end,
-                    summary=outage.reason,
-                    description=label,
-                    location=(
-                        f"{coordinator.settlement}, {coordinator.street}, "
-                        f"{coordinator.house}"
-                        if coordinator.has_address
-                        else None
-                    ),
-                    uid=f"{entry_id}-address-{outage.start.isoformat()}",
-                )
-            )
+        )
         return sorted(events, key=lambda e: e.start_datetime_local)
 
 

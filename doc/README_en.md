@@ -24,6 +24,20 @@ The schedule changes often, sometimes several times a day. So the integration:
 - **announces changes**: `schedule_published` (a new day appeared, usually tomorrow) and `schedule_changed` (the rest of a day changed), with the new and the previous outages;
 - **warns before outages**: `outage_warning` before a scheduled outage starts and `outage_end_warning` before it ends (power returns), each at the times you tick (e.g. 30 and 5 minutes). `outage_started` and `outage_ended` come at the exact times, without waiting for the next poll.
 
+## What it looks like
+
+<img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/dashboard.png" alt="Markdown, Entities and Calendar cards with the integration's data" width="640">
+
+Setup: settlement → street → house, the same as on the DTEK site.
+
+<img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/setup.gif" alt="Adding the integration: choosing the settlement, street and house" width="400">
+
+| Device | Calendar |
+|---|---|
+| <img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/device.png" alt="Device page with the sensors" width="380"> | <img src="https://raw.githubusercontent.com/NetZhizni/ha-dtek-krem-outages/main/doc/images/calendar.png" alt="Outage calendar with an event" width="480"> |
+
+Screenshots are from a Home Assistant instance with the Ukrainian UI.
+
 ## How it gets the data
 
 | Source | What | When |
@@ -411,6 +425,14 @@ The `Tag & Release` workflow runs on every push to `main` and reads `version` fr
 1. Bump `version` in `manifest.json`.
 2. Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` (a test checks it exists).
 3. Push to `main`.
+
+## Feedback
+
+- A bug, an address that can't be found or a wrong group: [open an issue](https://github.com/NetZhizni/ha-dtek-krem-outages/issues/new/choose), there is a template for each case.
+- Questions, ideas, your automations and dashboards: [Discussions](https://github.com/NetZhizni/ha-dtek-krem-outages/discussions).
+- Want to help with the code: see [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+If the integration is useful to you, star the repository: it helps others find it.
 
 ## License
 

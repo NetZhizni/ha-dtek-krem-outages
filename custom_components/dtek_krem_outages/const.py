@@ -64,6 +64,20 @@ CONF_SHOW_POSSIBLE: Final = "show_possible"
 # Language of the entity names and calendar texts, independent of the language
 # of Home Assistant: it is often left English while people use Ukrainian.
 CONF_LANGUAGE: Final = "language"
+# The other groups of the address are followed besides the main one; this
+# option tells how they enter the schedule the entities show.
+CONF_GROUPS_MODE: Final = "groups_mode"
+# The main group alone; the other groups are in a calendar of their own.
+GROUPS_MODE_MAIN: Final = "main"
+# An outage of any group is an outage.
+GROUPS_MODE_ANY: Final = "any"
+# An outage of every group is an outage, of some of them a possible outage.
+GROUPS_MODE_ALL: Final = "all"
+GROUPS_MODES: Final = (GROUPS_MODE_MAIN, GROUPS_MODE_ANY, GROUPS_MODE_ALL)
+# Groups DTEK lists for the address that the entry leaves out.
+CONF_EXCLUDED_GROUPS: Final = "excluded_groups"
+# Groups followed besides the main one by an entry without an address.
+CONF_EXTRA_GROUPS: Final = "extra_groups"
 
 DEFAULT_UPDATE_INTERVAL: Final = 5
 MIN_UPDATE_INTERVAL: Final = 2
@@ -85,6 +99,7 @@ LANGUAGES: Final[dict[str, str]] = {
     "ru": "Русский",
 }
 DEFAULT_LANGUAGE: Final = "uk"
+DEFAULT_GROUPS_MODE: Final = GROUPS_MODE_MAIN
 
 DEFAULT_OPTIONS: Final[dict[str, object]] = {
     CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
@@ -92,8 +107,15 @@ DEFAULT_OPTIONS: Final[dict[str, object]] = {
     CONF_WARN_END: list(DEFAULT_WARN_END),
     CONF_USE_MIRROR: DEFAULT_USE_MIRROR,
     CONF_SHOW_POSSIBLE: DEFAULT_SHOW_POSSIBLE,
+    CONF_GROUPS_MODE: DEFAULT_GROUPS_MODE,
+    CONF_EXCLUDED_GROUPS: [],
+    CONF_EXTRA_GROUPS: [],
     CONF_LANGUAGE: DEFAULT_LANGUAGE,
 }
+
+# A group DTEK stops listing for the house is dropped after this many answers
+# in a row without it; a new group is taken at once.
+GROUP_REMOVAL_UPDATES: Final = 3
 
 # Every event goes to the bus as EVENT_BUS with ``type`` set to one of these,
 # and to the event entity with the same event type.
@@ -101,20 +123,24 @@ EVENT_BUS: Final = f"{DOMAIN}_event"
 EVENT_SCHEDULE_PUBLISHED: Final = "schedule_published"
 EVENT_SCHEDULE_CHANGED: Final = "schedule_changed"
 EVENT_OUTAGE_WARNING: Final = "outage_warning"
+EVENT_POSSIBLE_OUTAGE_WARNING: Final = "possible_outage_warning"
 EVENT_OUTAGE_END_WARNING: Final = "outage_end_warning"
 EVENT_OUTAGE_STARTED: Final = "outage_started"
 EVENT_OUTAGE_ENDED: Final = "outage_ended"
 EVENT_ADDRESS_OUTAGE: Final = "address_outage"
 EVENT_GROUP_CHANGED: Final = "group_changed"
+EVENT_GROUPS_CHANGED: Final = "groups_changed"
 EVENT_TYPES: Final = (
     EVENT_SCHEDULE_PUBLISHED,
     EVENT_SCHEDULE_CHANGED,
     EVENT_OUTAGE_WARNING,
+    EVENT_POSSIBLE_OUTAGE_WARNING,
     EVENT_OUTAGE_END_WARNING,
     EVENT_OUTAGE_STARTED,
     EVENT_OUTAGE_ENDED,
     EVENT_ADDRESS_OUTAGE,
     EVENT_GROUP_CHANGED,
+    EVENT_GROUPS_CHANGED,
 )
 
 # Kinds of the outage DTEK reports for an address, derived from its text.
@@ -137,6 +163,22 @@ ADDRESS_STATUSES: Final = (
     OUTAGE_KIND_EMERGENCY,
     OUTAGE_KIND_PLANNED,
     OUTAGE_KIND_OTHER,
+)
+# State of the groups status sensor: which followed groups are off now.
+GROUPS_STATUS_NONE: Final = "none"
+GROUPS_STATUS_MAIN: Final = "main"
+GROUPS_STATUS_MAIN_SOME: Final = "main_some"
+GROUPS_STATUS_MAIN_ALL: Final = "main_all"
+GROUPS_STATUS_OTHERS_SOME: Final = "others_some"
+GROUPS_STATUS_OTHERS_ALL: Final = "others_all"
+# In order of the ``level`` attribute, 0 to 5, for charts that color by number.
+GROUPS_STATUSES: Final = (
+    GROUPS_STATUS_NONE,
+    GROUPS_STATUS_OTHERS_SOME,
+    GROUPS_STATUS_OTHERS_ALL,
+    GROUPS_STATUS_MAIN,
+    GROUPS_STATUS_MAIN_SOME,
+    GROUPS_STATUS_MAIN_ALL,
 )
 # Entities that need an address; an entry set up by group only has none.
 ADDRESS_ENTITIES: Final = (
@@ -175,18 +217,21 @@ CALENDAR_TEXT: Final[dict[str, dict[str, str]]] = {
         "outage": "Power outage",
         "possible": "Possible outage",
         "group": "Group",
+        "groups": "Groups",
         "weekly": "Weekly schedule of possible outages",
     },
     "uk": {
         "outage": "Відключення світла",
         "possible": "Можливе відключення",
         "group": "Черга",
+        "groups": "Черги",
         "weekly": "Тижневий графік можливих відключень",
     },
     "ru": {
         "outage": "Отключение света",
         "possible": "Возможное отключение",
         "group": "Очередь",
+        "groups": "Очереди",
         "weekly": "Недельный график возможных отключений",
     },
 }

@@ -7,6 +7,8 @@ from datetime import date, timedelta
 from custom_components.dtek_krem_outages.schedule import (
     ALL_ON,
     Interval,
+    combine_days,
+    combine_slots,
     format_intervals,
     future_changes,
     intervals,
@@ -166,3 +168,34 @@ def test_possible_days() -> None:
     # Outages of the weekly schedule are only possible outages.
     days = possible_days(preset, TODAY, 1, set())
     assert days[TODAY] == slots(possible=(("10:00", "11:00"),))
+
+
+def test_combine_slots() -> None:
+    """An outage wins over a possible outage, which wins over power."""
+    assert combine_slots(["1100?1", "10?1?1", "111111"]) == "1000?1"
+    assert combine_slots([slots(("08:00", "09:00"))]) == slots(("08:00", "09:00"))
+
+
+def test_combine_days() -> None:
+    """A day missing from one schedule counts as power on there."""
+    first = {TODAY: slots(("08:00", "10:00")), TOMORROW: slots(("00:00", "01:00"))}
+    second = {TODAY: slots(("09:00", "12:00"), possible=(("20:00", "21:00"),))}
+    assert combine_days([first, second]) == {
+        TODAY: slots(("08:00", "12:00"), possible=(("20:00", "21:00"),)),
+        TOMORROW: slots(("00:00", "01:00")),
+    }
+    assert combine_days([{1: slots()}, {1: slots(("01:00", "02:00")), 2: ALL_ON}]) == {
+        1: slots(("01:00", "02:00")),
+        2: ALL_ON,
+    }
+    assert combine_days([]) == {}
+
+
+def test_combine_slots_every() -> None:
+    """With ``every``, an outage of only some schedules is a possible outage."""
+    assert combine_slots(["0011?1", "0101?1"], every=True) == "0??1?1"
+    assert combine_slots(["0011?1"], every=True) == "0011?1"
+    # A day only one group has: nothing says the other one is off too.
+    assert combine_days([{TODAY: slots(("08:00", "09:00"))}, {}], every=True) == {
+        TODAY: slots(possible=(("08:00", "09:00"),))
+    }

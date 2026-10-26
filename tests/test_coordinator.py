@@ -15,7 +15,10 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.dtek_krem_outages.const import (
+    CONF_EXCLUDED_GROUPS,
+    CONF_EXTRA_GROUPS,
     CONF_GROUP,
+    CONF_GROUPS_MODE,
     CONF_USE_MIRROR,
     DEFAULT_OPTIONS,
     DOMAIN,
@@ -41,6 +44,7 @@ from .conftest import (
     TOMORROW,
     FakeDtek,
     get_entity_id,
+    kyiv,
     make_house,
     setup_entry,
     slots,
@@ -716,3 +720,347 @@ async def test_group_only_without_mirror_retries(
     mock_config_entry.add_to_hass(hass)
     await hass.config_entries.async_setup(mock_config_entry.entry_id)
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+
+
+OTHER = "GPV4.2"
+COMBINED = {**DEFAULT_OPTIONS, CONF_GROUPS_MODE: "any"}
+
+
+async def test_other_group_added_and_removed(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+) -> None:
+    """A group DTEK adds is followed at once and dropped after a few misses."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.group == GROUP
+    assert data.extra_groups == [OTHER]
+    # The known version came without a schedule: the whole one was asked for.
+    assert fake_dtek.schedule_forms[-1]["data[2][value]"] == FORCE_UPDATE_FACT
+    assert data.group_days[OTHER] == {TODAY: slots(("08:00", "12:00"))}
+    assert data.group_presets[OTHER][TODAY.isoweekday()] == slots()
+    # The main group alone is still what the entities show.
+    assert data.days[TODAY] == slots(("12:00", "14:00"), ("18:00", "20:30"))
+    assert stored(hass_storage)["extra_groups"] == [OTHER]
+    # The main group alone stays under ``preset`` for 0.1.4 and older.
+    assert stored(hass_storage)["preset"][str(TODAY.isoweekday())] == slots(
+        possible=(("16:00", "20:00"),)
+    )
+    added = bus_events(events, "groups_changed")
+    assert len(added) == 1
+    assert added[0]["added"] == ["4.2"]
+    assert added[0]["removed"] == []
+    assert added[0]["extra_groups"] == ["4.2"]
+    assert added[0]["group"] == GROUP
+    assert bus_events(events, "schedule_changed") == []
+    # The next request sends the version again.
+    await refresh(hass, mock_config_entry)
+    assert fake_dtek.schedule_forms[-1]["data[2][value]"] == "18.10.2026 09:00"
+
+    # A group missing twice and listed again stays.
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    await refresh(hass, mock_config_entry)
+    await refresh(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await refresh(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    await refresh(hass, mock_config_entry)
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.extra_groups == [OTHER]
+    assert len(bus_events(events, "groups_changed")) == 1
+
+    # The third answer in a row without it drops it.
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == []
+    assert OTHER not in data.group_days
+    assert data.groups_at_address == [GROUP]
+    removed = bus_events(events, "groups_changed")[-1]
+    assert removed["added"] == []
+    assert removed["removed"] == ["4.2"]
+    assert removed["extra_groups"] == []
+    assert bus_events(events, "schedule_changed") == []
+
+
+async def test_glitches_keep_other_groups(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A missing house, no groups or DTEK down remove nothing."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    events = async_capture_events(hass, EVENT_BUS)
+    await setup_entry(hass, mock_config_entry)
+    # The first update is silent, the group was there from the start.
+    assert bus_events(events) == []
+
+    for change in range(3):
+        if change == 0:
+            del fake_dtek.houses[HOUSE]
+        elif change == 1:
+            fake_dtek.houses[HOUSE] = make_house([])
+        else:
+            fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+        for _ in range(3):
+            await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == [OTHER]
+    assert data.groups_at_address == [GROUP, OTHER]
+    assert bus_events(events, "groups_changed") == []
+
+
+@pytest.mark.parametrize("options", [COMBINED])
+async def test_combined_groups(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Combined, an outage of any group is an outage of the entry."""
+    events = async_capture_events(hass, EVENT_BUS)
+    await setup_entry(hass, mock_config_entry)
+
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.combined
+    # The past of today stays; from now on 4.2 (08-12) adds to 3.1.
+    assert data.days[TODAY] == slots(("10:00", "14:00"), ("18:00", "20:30"))
+    assert data.group_days[GROUP][TODAY] == slots(
+        ("12:00", "14:00"), ("18:00", "20:30")
+    )
+    # 10:10 is now inside an outage of 4.2.
+    assert [e["type"] for e in bus_events(events)] == [
+        "groups_changed",
+        "schedule_changed",
+        "outage_started",
+    ]
+    assert bus_events(events, "schedule_changed")[0]["outages_text"] == (
+        "10:00–14:00, 18:00–20:30"
+    )
+    assert (
+        hass.states.get(get_entity_id(hass, "binary_sensor", "scheduled_outage")).state
+        == "on"
+    )
+
+    # Without the other group the entry follows the main group again.
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    for _ in range(3):
+        await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert not data.combined
+    assert data.days[TODAY] == slots(("12:00", "14:00"), ("18:00", "20:30"))
+    assert bus_events(events, "schedule_changed")[-1]["outages_text"] == (
+        "12:00–14:00, 18:00–20:30"
+    )
+
+
+@pytest.mark.parametrize("options", [COMBINED])
+async def test_combined_from_the_start(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The first update combines the groups listed for the house."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    fake_dtek.days[TOMORROW] = {GROUP: slots(("00:00", "01:00"))}
+    fake_dtek.weekly[OTHER] = {
+        day: slots(possible=(("06:00", "07:00"),)) for day in range(1, 8)
+    }
+    await setup_entry(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.days == {
+        TODAY: slots(("08:00", "14:00"), ("18:00", "20:30")),
+        # 4.2 has no tomorrow yet: 3.1 alone.
+        TOMORROW: slots(("00:00", "01:00")),
+    }
+    assert data.preset[1] == slots(possible=(("06:00", "07:00"), ("16:00", "20:00")))
+
+
+@pytest.mark.parametrize("options", [{**COMBINED, CONF_EXCLUDED_GROUPS: [OTHER]}])
+async def test_excluded_group(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A group left out in the options is not followed."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.groups_at_address == [GROUP, OTHER]
+    assert data.extra_groups == []
+    assert data.days[TODAY] == slots(("12:00", "14:00"), ("18:00", "20:30"))
+
+
+async def test_main_group_moves_to_other_group(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The other group becoming the main one is a group change only."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    fake_dtek.houses[HOUSE] = make_house([OTHER])
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.group == OTHER
+    assert data.extra_groups == []
+    assert set(data.group_days) == {OTHER}
+    assert data.days[TODAY] == slots(("10:00", "12:00"))
+    assert bus_events(events, "groups_changed") == []
+    assert bus_events(events, "group_changed")[0]["previous_group"] == GROUP
+
+
+async def test_store_without_other_groups(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+) -> None:
+    """A Store from before: its groups are followed, quietly, with a full schedule."""
+    hass_storage[STORE_KEY] = store_payload(
+        fact_update="18.10.2026 09:00",
+        days={TODAY.isoformat(): slots(("12:00", "14:00"), ("18:00", "20:30"))},
+        preset={"7": slots()},
+        groups_at_address=[GROUP, OTHER],
+    )
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    events = async_capture_events(hass, EVENT_BUS)
+    await setup_entry(hass, mock_config_entry)
+
+    assert fake_dtek.schedule_forms[0]["data[2][value]"] == FORCE_UPDATE_FACT
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == [OTHER]
+    assert data.group_days[GROUP][TODAY] == data.days[TODAY]
+    assert data.group_days[OTHER][TODAY] == slots(("08:00", "12:00"))
+    assert bus_events(events) == []
+
+
+@pytest.mark.parametrize("options", [COMBINED])
+async def test_restart_with_combine_turned_on(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+) -> None:
+    """Turning combining on changes the schedule without announcing it."""
+    group_days = {
+        GROUP: {TODAY.isoformat(): slots(("12:00", "14:00"), ("18:00", "20:30"))},
+        OTHER: {TODAY.isoformat(): slots(("08:00", "12:00"))},
+    }
+    hass_storage[STORE_KEY] = store_payload(
+        fact_update="18.10.2026 09:00",
+        days=group_days[GROUP],
+        group_days=group_days,
+        extra_groups=[OTHER],
+        groups_at_address=[GROUP, OTHER],
+    )
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    events = async_capture_events(hass, EVENT_BUS)
+    await setup_entry(hass, mock_config_entry)
+
+    assert fake_dtek.schedule_forms[0]["data[2][value]"] == "18.10.2026 09:00"
+    assert mock_config_entry.runtime_data.data.days[TODAY] == slots(
+        ("10:00", "14:00"), ("18:00", "20:30")
+    )
+    assert bus_events(events) == []
+
+
+async def test_hidden_schedule_clears_other_groups(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """While DTEK hides the schedule, the other groups have none either."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    fake_dtek.flags["showTableFact"] = False
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.group_days[OTHER][TODAY] == slots(("08:00", "10:00"))
+    assert data.group_days[GROUP][TODAY] == slots()
+
+
+@pytest.mark.parametrize("entry_data", [GROUP_ONLY_DATA])
+@pytest.mark.parametrize("options", [{**COMBINED, CONF_EXTRA_GROUPS: [OTHER, GROUP]}])
+async def test_group_only_entry_with_other_groups(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Without an address the other groups come from the options."""
+    await setup_entry(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == [OTHER]
+    assert data.days[TODAY] == slots(("08:00", "14:00"), ("18:00", "20:30"))
+
+
+@pytest.mark.parametrize("options", [{**DEFAULT_OPTIONS, CONF_GROUPS_MODE: "all"}])
+async def test_all_groups_mode(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """An outage of every group is an outage, of some of them a possible one."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    fake_dtek.days[TODAY][OTHER] = slots(("08:00", "13:00"))
+    fake_dtek.days[TOMORROW] = {GROUP: slots(("00:00", "01:00"))}
+    await setup_entry(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.groups_mode == "all"
+    assert data.combined
+    assert data.days[TODAY] == slots(
+        ("12:00", "13:00"),
+        possible=(("08:00", "12:00"), ("13:00", "14:00"), ("18:00", "20:30")),
+    )
+    # 4.2 has no tomorrow yet: an outage of 3.1 alone is only possible.
+    assert data.days[TOMORROW] == slots(possible=(("00:00", "01:00"),))
+    assert [(i.start, i.end) for i in data.outages] == [
+        (kyiv(TODAY, "12:00"), kyiv(TODAY, "13:00"))
+    ]
+
+
+async def test_whole_schedule_not_asked_twice(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A request that asked for the whole schedule in vain is not repeated."""
+    await setup_entry(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    fake_dtek.send_fact = False
+
+    # The known version first; the new group then asks for the whole one.
+    sent = len(fake_dtek.schedule_forms)
+    await refresh(hass, mock_config_entry)
+    assert [f["data[2][value]"] for f in fake_dtek.schedule_forms[sent:]] == [
+        "18.10.2026 09:00",
+        FORCE_UPDATE_FACT,
+    ]
+    # Still no schedule: one request for the whole one, not two.
+    sent = len(fake_dtek.schedule_forms)
+    await refresh(hass, mock_config_entry)
+    assert [f["data[2][value]"] for f in fake_dtek.schedule_forms[sent:]] == [
+        FORCE_UPDATE_FACT
+    ]
+
+    fake_dtek.send_fact = True
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.group_days[OTHER] == {TODAY: slots(("08:00", "12:00"))}
+
+
+@pytest.mark.parametrize(
+    "options", [{**DEFAULT_OPTIONS, CONF_EXCLUDED_GROUPS: [OTHER]}]
+)
+async def test_group_no_longer_excluded(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A group taken out of the left-out ones is back at once, with no event."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.extra_groups == []
+
+    # Even with DTEK down: the groups it listed are in the Store.
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+    events = async_capture_events(hass, EVENT_BUS)
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={**DEFAULT_OPTIONS, CONF_EXCLUDED_GROUPS: []}
+    )
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == [OTHER]
+    # The mirror has the same version; the new group takes it.
+    assert data.group_days[OTHER] == {TODAY: slots(("08:00", "12:00"))}
+    assert bus_events(events, "groups_changed") == []

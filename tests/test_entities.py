@@ -15,6 +15,7 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.dtek_krem_outages.const import (
     ATTRIBUTION,
+    CONF_GROUPS_MODE,
     CONF_LANGUAGE,
     CONF_SHOW_POSSIBLE,
     CONF_WARN_END,
@@ -136,6 +137,7 @@ async def test_outage_edges_and_warning(
     assert warning["start"] == "2026-10-18T12:00:00+03:00"
     assert warning["end"] == "2026-10-18T14:00:00+03:00"
     assert warning["duration_minutes"] == 120
+    assert warning["groups"] == ["3.1"]
     assert state(hass, "event", "events").attributes["event_type"] == "outage_warning"
 
     await move_to(hass, frozen_now, kyiv(TODAY, "12:00"))
@@ -565,3 +567,228 @@ async def test_calendar_hides_weekly_with_dtek(
     assert (
         state(hass, "sensor", "connection").attributes["weekly_schedule_shown"] is False
     )
+
+
+async def calendar_events(
+    hass: HomeAssistant, key: str, days: int = 2
+) -> list[dict[str, Any]]:
+    """Return the events of a calendar of the test entry from today on."""
+    entity_id = get_entity_id(hass, "calendar", key)
+    response = await hass.services.async_call(
+        "calendar",
+        "get_events",
+        {
+            ATTR_ENTITY_ID: entity_id,
+            "start_date_time": kyiv(TODAY, "00:00"),
+            "end_date_time": kyiv(TODAY + timedelta(days=days), "00:00"),
+        },
+        blocking=True,
+        return_response=True,
+    )
+    return response[entity_id]["events"]
+
+
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en"}])
+async def test_other_groups_calendar(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The other groups of the address have their own calendar."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    fake_dtek.weekly["GPV4.2"] = {
+        day: slots(possible=(("06:00", "07:00"),)) for day in range(1, 8)
+    }
+    await setup_entry(hass, mock_config_entry)
+
+    group = state(hass, "sensor", "group")
+    assert group.attributes["groups_at_address"] == ["3.1", "4.2"]
+    assert group.attributes["extra_groups"] == ["4.2"]
+    today = state(hass, "sensor", "outages_today")
+    assert today.attributes["groups"] == {
+        "3.1": "12:00–14:00, 18:00–20:30",
+        "4.2": "08:00–12:00",
+    }
+    assert group.attributes["groups_mode"] == "main"
+
+    calendar = state(hass, "calendar", "other_groups")
+    assert calendar.attributes["friendly_name"] == f"{TITLE} Other groups"
+    # 4.2 is off 08:00-12:00, it is 10:10.
+    assert calendar.state == "on"
+    assert calendar.attributes["message"] == "Group 4.2: Power outage"
+    assert calendar.attributes["description"] == "Group 4.2"
+    events = await calendar_events(hass, "other_groups")
+    assert [(e["summary"], e["start"], e["end"]) for e in events] == [
+        (
+            "Group 4.2: Power outage",
+            "2026-10-18T08:00:00+03:00",
+            "2026-10-18T12:00:00+03:00",
+        ),
+        (
+            "Group 4.2: Possible outage",
+            "2026-10-19T06:00:00+03:00",
+            "2026-10-19T07:00:00+03:00",
+        ),
+    ]
+    # The main calendar keeps the main group.
+    assert state(hass, "calendar", "outages").attributes["description"] == "Group 3.1"
+    assert state(hass, "binary_sensor", "scheduled_outage").state == "off"
+
+
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en", CONF_GROUPS_MODE: "any"}])
+async def test_combined_calendar(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Combined, the main calendar and sensors follow every group."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    await setup_entry(hass, mock_config_entry)
+    calendar = state(hass, "calendar", "outages")
+    assert calendar.attributes["description"] == "Groups 3.1, 4.2"
+    events = await calendar_events(hass, "outages", days=1)
+    assert [(e["start"], e["end"]) for e in events] == [
+        ("2026-10-18T08:00:00+03:00", "2026-10-18T14:00:00+03:00"),
+        ("2026-10-18T18:00:00+03:00", "2026-10-18T20:30:00+03:00"),
+    ]
+    assert state(hass, "binary_sensor", "scheduled_outage").state == "on"
+    assert state(hass, "sensor", "outages_today").state == "8.5"
+    assert state(hass, "sensor", "group").attributes["groups_mode"] == "any"
+
+
+@pytest.mark.parametrize("options", [{CONF_GROUPS_MODE: "any"}])
+async def test_groups_mode_in_effect(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Without other groups the mode in effect is the main group alone."""
+    await setup_entry(hass, mock_config_entry)
+    assert state(hass, "sensor", "group").attributes["groups_mode"] == "main"
+
+
+async def test_other_groups_calendar_empty(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """With one group at the address the calendar of other groups is empty."""
+    await setup_entry(hass, mock_config_entry)
+    calendar = state(hass, "calendar", "other_groups")
+    assert calendar.state == "off"
+    assert calendar.attributes["friendly_name"] == f"{TITLE} Інші черги"
+    assert await calendar_events(hass, "other_groups", days=7) == []
+
+
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en", CONF_GROUPS_MODE: "all"}])
+async def test_all_groups_warnings_and_calendar(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """All groups off is an outage, some of them a possible outage, both warned."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    fake_dtek.days[TODAY]["GPV4.2"] = slots(("08:00", "13:00"))
+    await setup_entry(hass, mock_config_entry)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+
+    events = await calendar_events(hass, "outages", days=1)
+    assert [(e["summary"], e["start"][11:16], e["description"]) for e in events] == [
+        ("Possible outage", "08:00", "Group 4.2"),
+        ("Power outage", "12:00", "Groups 3.1, 4.2"),
+        ("Possible outage", "13:00", "Group 3.1"),
+        ("Possible outage", "18:00", "Group 3.1"),
+    ]
+    assert state(hass, "binary_sensor", "scheduled_outage").state == "off"
+
+    captured = async_capture_events(hass, EVENT_BUS)
+    await move_to(hass, frozen_now, kyiv(TODAY, "11:30"))
+    assert [e.data["type"] for e in captured] == ["outage_warning"]
+    assert captured[0].data["groups"] == ["3.1", "4.2"]
+    assert captured[0].data["end"] == "2026-10-18T13:00:00+03:00"
+
+    await move_to(hass, frozen_now, kyiv(TODAY, "12:00"))
+    assert state(hass, "binary_sensor", "scheduled_outage").state == "on"
+    await move_to(hass, frozen_now, kyiv(TODAY, "13:00"))
+    # The possible outage right after the outage gets no warning.
+    await move_to(hass, frozen_now, kyiv(TODAY, "17:29"))
+    assert [e.data["type"] for e in captured] == [
+        "outage_warning",
+        "outage_started",
+        "outage_ended",
+    ]
+
+    await move_to(hass, frozen_now, kyiv(TODAY, "17:30"))
+    possible = captured[-1].data
+    assert possible["type"] == "possible_outage_warning"
+    assert possible["minutes"] == 30
+    assert possible["start"] == "2026-10-18T18:00:00+03:00"
+    assert possible["end"] == "2026-10-18T20:30:00+03:00"
+    assert possible["groups"] == ["3.1"]
+    assert state(hass, "event", "events").attributes["event_type"] == (
+        "possible_outage_warning"
+    )
+
+
+async def test_groups_status(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """The status tells which groups are off and switches at their edges."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    fake_dtek.days[TODAY]["GPV4.2"] = slots(("08:00", "13:00"))
+    await setup_entry(hass, mock_config_entry)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+
+    status = state(hass, "sensor", "groups_status")
+    assert status.state == "others_all"
+    assert status.attributes["groups_off"] == ["4.2"]
+    assert status.attributes["main_group"] == "3.1"
+    assert status.attributes["extra_groups"] == ["4.2"]
+    assert status.attributes["level"] == 2
+    assert status.attributes["data_status"] == "current"
+    assert get_entity_id(hass, "sensor", "groups_status").endswith("_groups_status")
+
+    for time, expected, level in (
+        ("12:00", "main_all", 5),
+        ("13:00", "main", 3),
+        ("14:00", "none", 0),
+    ):
+        await move_to(hass, frozen_now, kyiv(TODAY, time))
+        status = state(hass, "sensor", "groups_status")
+        assert (status.state, status.attributes["level"]) == (expected, level), time
+
+
+async def test_groups_status_one_group(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """With the main group alone the status is that group or no outage."""
+    await setup_entry(hass, mock_config_entry)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+    assert state(hass, "sensor", "groups_status").state == "none"
+    await move_to(hass, frozen_now, kyiv(TODAY, "12:00"))
+    assert state(hass, "sensor", "groups_status").state == "main"
+
+
+async def test_groups_status_timeline(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The whole day as runs of one status, for charts of past and future."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    fake_dtek.days[TODAY]["GPV4.2"] = slots(("08:00", "13:00"))
+    await setup_entry(hass, mock_config_entry)
+    status = state(hass, "sensor", "groups_status")
+    runs = [
+        (r["start"][11:16], r["end"][11:16], r["state"], r["level"], r["groups"])
+        for r in status.attributes["today"]
+    ]
+    assert runs == [
+        ("00:00", "08:00", "none", 0, []),
+        ("08:00", "12:00", "others_all", 2, ["4.2"]),
+        ("12:00", "13:00", "main_all", 5, ["3.1", "4.2"]),
+        ("13:00", "14:00", "main", 3, ["3.1"]),
+        ("14:00", "18:00", "none", 0, []),
+        ("18:00", "20:30", "main", 3, ["3.1"]),
+        ("20:30", "00:00", "none", 0, []),
+    ]
+    assert status.attributes["today"][0]["start"] == "2026-10-18T00:00:00+03:00"
+    assert status.attributes["today"][-1]["end"] == "2026-10-19T00:00:00+03:00"
+    assert status.attributes["tomorrow"] is None

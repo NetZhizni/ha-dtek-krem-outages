@@ -13,7 +13,9 @@ DTEK describes a day with 24 hourly values, ``"1"`` being 00:00-01:00 and
 
 A day is kept as a 48 character string, one character per half hour:
 ``1`` power on, ``0`` outage, ``?`` possible outage. Strings are cheap to
-store, compare and slice, which is all the merge logic needs.
+store, compare and slice, which is all the merge logic needs. Schedules of
+several groups combine slot by slot: into the worst of them, or into an outage
+only where all of them are off and a possible outage where some are.
 """
 
 from __future__ import annotations
@@ -185,6 +187,41 @@ def merge_days(
         else:
             merged[day] = new
     return merged
+
+
+def _combine_slot(chars: tuple[str, ...], every: bool) -> str:
+    if SLOT_OFF in chars and not (every and any(c != SLOT_OFF for c in chars)):
+        return SLOT_OFF
+    if SLOT_OFF in chars or SLOT_MAYBE in chars:
+        return SLOT_MAYBE
+    return SLOT_ON
+
+
+def combine_slots(values: Iterable[str], *, every: bool = False) -> str:
+    """Return several schedules of one day as one, slot by slot.
+
+    An outage in any of them is an outage. With ``every``, an outage needs all
+    of them off, and an outage in only some of them is a possible outage.
+    Otherwise a possible outage in any of them is a possible outage.
+    """
+    return "".join(_combine_slot(chars, every) for chars in zip(*values, strict=True))
+
+
+def combine_days[K: (date, int)](
+    schedules: Iterable[Mapping[K, str]], *, every: bool = False
+) -> dict[K, str]:
+    """Combine the schedules of several groups day by day (or weekday).
+
+    A day missing from some of them counts as power on there: the worst of
+    the others stays as it is, and with ``every`` an outage of all the others
+    is only a possible outage, since nothing says the missing ones are off.
+    """
+    groups = list(schedules)
+    days = sorted({day for group in groups for day in group})
+    return {
+        day: combine_slots([group.get(day, ALL_ON) for group in groups], every=every)
+        for day in days
+    }
 
 
 @dataclass(frozen=True, slots=True)

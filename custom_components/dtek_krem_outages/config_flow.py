@@ -33,8 +33,11 @@ from homeassistant.helpers.selector import (
 from .api import DtekError, DtekNotFoundError, House, async_get_client
 from .const import (
     CALENDAR_TEXT,
+    CONF_EXCLUDED_GROUPS,
+    CONF_EXTRA_GROUPS,
     CONF_GROUP,
     CONF_GROUP_MANUAL,
+    CONF_GROUPS_MODE,
     CONF_HOUSE,
     CONF_LANGUAGE,
     CONF_SETTLEMENT,
@@ -44,10 +47,12 @@ from .const import (
     CONF_USE_MIRROR,
     CONF_WARN_END,
     CONF_WARN_START,
+    DEFAULT_GROUPS_MODE,
     DEFAULT_LANGUAGE,
     DEFAULT_OPTIONS,
     DOMAIN,
     GROUPS,
+    GROUPS_MODES,
     LANGUAGES,
     MAX_UPDATE_INTERVAL,
     MIN_UPDATE_INTERVAL,
@@ -247,22 +252,30 @@ def _warning_select(options: Mapping[str, Any], key: str) -> SelectSelector:
     )
 
 
-def _group_select(choices: list[str]) -> SelectSelector:
+def _group_select(choices: list[str], *, multiple: bool = False) -> SelectSelector:
     """A dropdown of groups labelled like people say them: ``3.1``."""
     return SelectSelector(
         SelectSelectorConfig(
             options=[
                 SelectOptionDict(value=g, label=group_name(g) or g) for g in choices
             ],
+            multiple=multiple,
             mode=SelectSelectorMode.DROPDOWN,
         )
     )
 
 
+def _known_groups(value: Any, skip: str | None = None) -> list[str]:
+    """Return the groups of an option value in UI order."""
+    groups = value if isinstance(value, list | tuple) else []
+    return [g for g in GROUPS if g in groups and g != skip]
+
+
 def _options_schema(
-    options: Mapping[str, Any], *, has_address: bool = True
+    options: Mapping[str, Any], *, has_address: bool = True, group: str | None = None
 ) -> dict[vol.Marker, Any]:
     values = {**DEFAULT_OPTIONS, **options}
+    others = [g for g in GROUPS if g != group]
     schema: dict[vol.Marker, Any] = {
         vol.Required(
             CONF_UPDATE_INTERVAL, default=values[CONF_UPDATE_INTERVAL]
@@ -290,13 +303,38 @@ def _options_schema(
         vol.Required(
             CONF_SHOW_POSSIBLE, default=values[CONF_SHOW_POSSIBLE]
         ): BooleanSelector(),
+        vol.Required(
+            CONF_GROUPS_MODE,
+            default=values[CONF_GROUPS_MODE]
+            if values[CONF_GROUPS_MODE] in GROUPS_MODES
+            else DEFAULT_GROUPS_MODE,
+        ): SelectSelector(
+            SelectSelectorConfig(
+                options=list(GROUPS_MODES),
+                mode=SelectSelectorMode.LIST,
+                translation_key="groups_mode",
+            )
+        ),
+        vol.Required(
+            CONF_EXCLUDED_GROUPS,
+            default=_known_groups(values[CONF_EXCLUDED_GROUPS]),
+        ): _group_select(list(GROUPS), multiple=True),
+        vol.Required(
+            CONF_EXTRA_GROUPS,
+            default=_known_groups(values[CONF_EXTRA_GROUPS], group),
+        ): _group_select(others, multiple=True),
         vol.Required(CONF_LANGUAGE, default=values[CONF_LANGUAGE]): vol.All(
             _language_select(), vol.In(LANGUAGES)
         ),
     }
-    if not has_address:
-        # Without an address the mirror is the only source anyway.
+    if has_address:
+        # The other groups come from DTEK; some can be left out.
+        del schema[CONF_EXTRA_GROUPS]
+    else:
+        # Without an address the mirror is the only source anyway, and the
+        # other groups are chosen here.
         del schema[CONF_USE_MIRROR]
+        del schema[CONF_EXCLUDED_GROUPS]
     return schema
 
 
@@ -615,12 +653,18 @@ class DtekKremOptionsFlow(OptionsFlowWithReload):
             }
             for key in (CONF_WARN_START, CONF_WARN_END):
                 data[key] = list(warning_thresholds(data, key))
+            data[CONF_EXCLUDED_GROUPS] = _known_groups(data[CONF_EXCLUDED_GROUPS])
+            data[CONF_EXTRA_GROUPS] = _known_groups(
+                data[CONF_EXTRA_GROUPS], self.config_entry.data.get(CONF_GROUP)
+            )
             return self.async_create_entry(data=data)
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
                 _options_schema(
-                    options, has_address=CONF_HOUSE in self.config_entry.data
+                    options,
+                    has_address=CONF_HOUSE in self.config_entry.data,
+                    group=self.config_entry.data.get(CONF_GROUP),
                 )
             ),
         )

@@ -37,7 +37,7 @@
       },
       "group": {
         "title": "Group",
-        "description": "DTEK does not name exactly one group for {settlement}, {street}, {house} (listed: {groups}). Choose the group whose schedule to follow; the DTEK website shows it after you enter the address.",
+        "description": "DTEK does not name exactly one group for {settlement}, {street}, {house} (listed: {groups}). Choose the main group, the one whose schedule to follow; the DTEK website shows it after you enter the address. The other groups of the house are shown in the \"Other groups\" calendar and can be combined with the main one in the options.",
         "data": {
           "group": "Group"
         }
@@ -89,14 +89,20 @@
           "warn_before_end": "Warn before an outage ends (power returns)",
           "use_mirror": "Use the backup source",
           "show_possible": "Show possible outages in the calendar",
+          "groups_mode": "Other groups of the address in the schedule",
+          "excluded_groups": "Leave out groups",
+          "extra_groups": "Other groups",
           "language": "Language of entity names"
         },
         "data_description": {
           "update_interval": "Minutes between requests to DTEK (at least 2).",
-          "warn_before_start": "Tick how long before a scheduled outage to send the \"outage_warning\" event. Nothing ticked turns it off.",
+          "warn_before_start": "Tick how long before a scheduled outage to send the \"outage_warning\" event, and before a possible outage \"possible_outage_warning\". Nothing ticked turns it off.",
           "warn_before_end": "Tick how long before a scheduled outage ends to send the \"outage_end_warning\" event. Nothing ticked turns it off.",
           "use_mirror": "When DTEK can't be reached, take the schedule from the public mirror github.com/Baskerville42/outage-data-ua.",
           "show_possible": "Fill days without an actual schedule with the weekly schedule of possible outages, while DTEK shows that schedule on its website.",
+          "groups_mode": "What the sensors, events, warnings and the \"Outages\" calendar follow when DTEK lists several groups for the house. What already happened is not rewritten.",
+          "excluded_groups": "Groups DTEK lists for the house that are not followed, e.g. when you know your entrance is on the main group.",
+          "extra_groups": "Groups followed besides the main one; their schedule comes from the mirror too.",
           "language": "Names of the entities and calendar events, whatever the language of Home Assistant. Entity IDs stay in English."
         }
       }
@@ -113,6 +119,13 @@
         "60": "60 min",
         "120": "120 min"
       }
+    },
+    "groups_mode": {
+      "options": {
+        "main": "Main group only (the others are in the \"Other groups\" calendar)",
+        "any": "Outage when any group is off",
+        "all": "Outage when all groups are off, possible outage when some are"
+      }
     }
   },
   "entity": {
@@ -127,6 +140,9 @@
     "calendar": {
       "outages": {
         "name": "Outages"
+      },
+      "other_groups": {
+        "name": "Other groups"
       }
     },
     "event": {
@@ -138,11 +154,13 @@
               "schedule_published": "Schedule published",
               "schedule_changed": "Schedule changed",
               "outage_warning": "Outage warning",
+              "possible_outage_warning": "Possible outage warning",
               "outage_end_warning": "Outage ending soon",
               "outage_started": "Outage started",
               "outage_ended": "Outage ended",
               "address_outage": "Outage at address",
-              "group_changed": "Group changed"
+              "group_changed": "Group changed",
+              "groups_changed": "Groups of the address changed"
             }
           }
         }
@@ -169,6 +187,17 @@
       },
       "group": {
         "name": "Group"
+      },
+      "groups_status": {
+        "name": "Groups status",
+        "state": {
+          "none": "No outage",
+          "main": "Main group only",
+          "main_some": "Main and some other groups",
+          "main_all": "Main and all other groups",
+          "others_some": "Some other groups only",
+          "others_all": "All other groups only"
+        }
       },
       "last_update": {
         "name": "Last update"

@@ -17,6 +17,9 @@
     "calendar": {
       "outages": {
         "default": "mdi:calendar-clock"
+      },
+      "other_groups": {
+        "default": "mdi:calendar-multiple"
       }
     },
     "event": {
@@ -42,6 +45,17 @@
       },
       "group": {
         "default": "mdi:format-list-numbered"
+      },
+      "groups_status": {
+        "default": "mdi:transmission-tower",
+        "state": {
+          "none": "mdi:lightbulb-on-outline",
+          "main": "mdi:lightbulb-off-outline",
+          "main_some": "mdi:lightbulb-off-outline",
+          "main_all": "mdi:lightbulb-off",
+          "others_some": "mdi:lightbulb-question-outline",
+          "others_all": "mdi:lightbulb-question"
+        }
       },
       "last_update": {
         "default": "mdi:cloud-check-outline"

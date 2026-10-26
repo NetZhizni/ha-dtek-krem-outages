@@ -18,7 +18,7 @@
           "street": "Street"
         },
         "data_description": {
-          "street": "Villages without street names have \"Без вулиці\"."
+          "street": "Start typing the name, \"вул.\"/\"пров.\" can be left out. Streets DTEK lists under another spelling of the settlement (with or without \"с.\", \"смт\") have it in brackets. Villages without street names have \"Без вулиці\"."
         }
       },
       "house": {
@@ -26,11 +26,13 @@
         "description": "Houses of {settlement}, {street}.",
         "data": {
           "house": "House number",
-          "name": "Name"
+          "name": "Name",
+          "language": "Language of entity names"
         },
         "data_description": {
           "house": "As listed by DTEK, e.g. \"43\", \"8 а\" or \"1/2\".",
-          "name": "Leave empty to use the address."
+          "name": "Leave empty to use the address.",
+          "language": "Names of the entities and calendar events, whatever the language of Home Assistant. Entity IDs stay in English."
         }
       },
       "group": {
@@ -60,16 +62,33 @@
         "title": "DTEK KREM Outages options",
         "data": {
           "update_interval": "Update interval",
-          "warning_minutes": "Warning before an outage",
+          "warn_before_start": "Warn before an outage starts",
+          "warn_before_end": "Warn before an outage ends (power returns)",
           "use_mirror": "Use the backup source",
-          "show_possible": "Show possible outages in the calendar"
+          "show_possible": "Show possible outages in the calendar",
+          "language": "Language of entity names"
         },
         "data_description": {
           "update_interval": "Minutes between requests to DTEK (at least 2).",
-          "warning_minutes": "Minutes before a scheduled outage to send the \"outage_warning\" event. 0 turns warnings off.",
+          "warn_before_start": "Tick how long before a scheduled outage to send the \"outage_warning\" event. Nothing ticked turns it off.",
+          "warn_before_end": "Tick how long before a scheduled outage ends to send the \"outage_end_warning\" event. Nothing ticked turns it off.",
           "use_mirror": "When DTEK can't be reached, take the schedule from the public mirror github.com/Baskerville42/outage-data-ua.",
-          "show_possible": "Fill days without an actual schedule with the weekly schedule of possible outages."
+          "show_possible": "Fill days without an actual schedule with the weekly schedule of possible outages.",
+          "language": "Names of the entities and calendar events, whatever the language of Home Assistant. Entity IDs stay in English."
         }
+      }
+    }
+  },
+  "selector": {
+    "warning_minutes": {
+      "options": {
+        "1": "1 min",
+        "5": "5 min",
+        "10": "10 min",
+        "15": "15 min",
+        "30": "30 min",
+        "60": "60 min",
+        "120": "120 min"
       }
     }
   },
@@ -96,6 +115,7 @@
               "schedule_published": "Schedule published",
               "schedule_changed": "Schedule changed",
               "outage_warning": "Outage warning",
+              "outage_end_warning": "Outage ending soon",
               "outage_started": "Outage started",
               "outage_ended": "Outage ended",
               "address_outage": "Outage at address",

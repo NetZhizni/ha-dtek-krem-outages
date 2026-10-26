@@ -15,14 +15,17 @@ from pytest_homeassistant_custom_component.common import (
 
 from custom_components.dtek_krem_outages.const import (
     ATTRIBUTION,
+    CONF_LANGUAGE,
     CONF_SHOW_POSSIBLE,
+    CONF_WARN_END,
+    CONF_WARN_START,
     CONF_WARNING_MINUTES,
     DOMAIN,
     EVENT_BUS,
 )
 from homeassistant.const import ATTR_ATTRIBUTION, ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
 
 from .conftest import (
@@ -102,6 +105,15 @@ async def test_sensor_states(
     assert device.entry_type is dr.DeviceEntryType.SERVICE
 
 
+async def test_outage_binary_sensors_are_problems(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """``on`` means an outage, so the UI shows Problem / OK, not On / Off."""
+    await setup_entry(hass, mock_config_entry)
+    for key in ("scheduled_outage", "address_outage"):
+        assert state(hass, "binary_sensor", key).attributes["device_class"] == "problem"
+
+
 async def test_outage_edges_and_warning(
     hass: HomeAssistant,
     fake_dtek: FakeDtek,
@@ -165,18 +177,102 @@ async def test_warning_for_soon_outage_after_change(
     assert len([e for e in events if e.data["type"] == "outage_warning"]) == 1
 
 
-@pytest.mark.parametrize("options", [{CONF_WARNING_MINUTES: 0}])
+@pytest.mark.parametrize("options", [{CONF_WARN_START: []}])
 async def test_warning_disabled(
     hass: HomeAssistant,
     fake_dtek: FakeDtek,
     mock_config_entry: MockConfigEntry,
     frozen_now: FrozenDateTimeFactory,
 ) -> None:
-    """0 minutes turns warnings off."""
+    """Nothing ticked turns warnings off."""
     await setup_entry(hass, mock_config_entry)
     events = async_capture_events(hass, EVENT_BUS)
     await move_to(hass, frozen_now, kyiv(TODAY, "11:59"))
     assert [e.data["type"] for e in events] == []
+
+
+@pytest.mark.parametrize("options", [{CONF_WARNING_MINUTES: 45}])
+async def test_legacy_warning_minutes(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """An entry saved with the single number warns once, before the start."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    await move_to(hass, frozen_now, kyiv(TODAY, "11:15"))
+    assert [e.data["minutes"] for e in events] == [45]
+
+
+@pytest.mark.parametrize(
+    "options", [{CONF_WARN_START: [30, 5], CONF_WARN_END: [30, 5]}]
+)
+async def test_several_warnings(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """Each ticked time warns before the start and before the end."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+
+    for at in ("11:30", "11:55", "12:00", "13:30", "13:55", "14:00"):
+        await move_to(hass, frozen_now, kyiv(TODAY, at))
+    assert [(e.data["type"], e.data.get("minutes")) for e in events] == [
+        ("outage_warning", 30),
+        ("outage_warning", 5),
+        ("outage_started", None),
+        ("outage_end_warning", 30),
+        ("outage_end_warning", 5),
+        ("outage_ended", None),
+    ]
+    ending = events[3].data
+    assert ending["start"] == "2026-10-18T12:00:00+03:00"
+    assert ending["end"] == "2026-10-18T14:00:00+03:00"
+    assert state(hass, "event", "events").attributes["event_type"] == "outage_ended"
+
+
+@pytest.mark.parametrize("options", [{CONF_WARN_START: [30, 20]}])
+async def test_soon_outage_gives_one_warning(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """An outage that starts within several thresholds is announced only once."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    # Now is 10:10: the outage starts in 20 minutes, inside both thresholds.
+    fake_dtek.days[TODAY][GROUP] = slots(("10:30", "11:00"), ("12:00", "14:00"))
+    fake_dtek.update = "18.10.2026 10:05"
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    warnings = [e.data["minutes"] for e in events if e.data["type"] == "outage_warning"]
+    assert warnings == [20]
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    assert len([e for e in events if e.data["type"] == "outage_warning"]) == 1
+
+
+@pytest.mark.parametrize("options", [{CONF_WARN_START: [], CONF_WARN_END: [30, 5]}])
+async def test_late_end_warning_is_sent_once(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """A wake-up inside every threshold gives one "ending" event, not one each."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+    await move_to(hass, frozen_now, kyiv(TODAY, "12:00"))
+    events.clear()
+    # The 13:30 timer wakes up late, when 5 minutes are already inside 30 too.
+    await move_to(hass, frozen_now, kyiv(TODAY, "13:56"))
+    ending = [e.data for e in events if e.data["type"] == "outage_end_warning"]
+    assert [w["minutes"] for w in ending] == [4]
+    await move_to(hass, frozen_now, kyiv(TODAY, "13:58"))
+    assert len([e for e in events if e.data["type"] == "outage_end_warning"]) == 1
 
 
 async def test_midnight_rollover(
@@ -235,7 +331,8 @@ async def test_calendar(
     """The calendar lists outages, possible outages and address works."""
     mock_config_entry.add_to_hass(hass)
     hass.config_entries.async_update_entry(
-        mock_config_entry, options={**mock_config_entry.options, **options}
+        mock_config_entry,
+        options={**mock_config_entry.options, CONF_LANGUAGE: "en", **options},
     )
     fake_dtek.houses[HOUSE] = make_house(
         reason="Планові ремонтні роботи",
@@ -273,15 +370,57 @@ async def test_calendar(
         assert possible == []
 
 
-async def test_calendar_in_ukrainian(
+async def test_ukrainian_names(
     hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
 ) -> None:
-    """Calendar texts follow the Home Assistant language."""
-    hass.config.language = "uk"
+    """Names and calendar texts are Ukrainian by default, even if HA is English."""
+    assert hass.config.language == "en"
     await setup_entry(hass, mock_config_entry)
+    entity_id = get_entity_id(hass, "sensor", "next_outage")
+    assert entity_id.endswith("_next_outage")
+    assert hass.states.get(entity_id).attributes["friendly_name"] == (
+        f"{TITLE} Наступне відключення"
+    )
+    entry = er.async_get(hass).async_get(entity_id)
+    assert entry.original_name == "Наступне відключення"
+    assert state(hass, "event", "events").attributes["friendly_name"] == (
+        f"{TITLE} Події відключень"
+    )
     calendar = state(hass, "calendar", "outages")
+    assert calendar.attributes["friendly_name"] == f"{TITLE} Відключення"
     assert calendar.attributes["message"] == "Відключення світла"
     assert calendar.attributes["description"] == "Черга 3.1"
+
+
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en"}])
+async def test_english_names(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The English language option gives English names, even if HA is Ukrainian."""
+    hass.config.language = "uk"
+    await setup_entry(hass, mock_config_entry)
+    entity_id = get_entity_id(hass, "binary_sensor", "scheduled_outage")
+    assert entity_id.endswith("_scheduled_outage")
+    assert hass.states.get(entity_id).attributes["friendly_name"] == (
+        f"{TITLE} Scheduled outage"
+    )
+    assert state(hass, "calendar", "outages").attributes["message"] == "Power outage"
+
+
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "ru"}])
+async def test_russian_names(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The Russian language option gives Russian names and calendar texts."""
+    await setup_entry(hass, mock_config_entry)
+    entity_id = get_entity_id(hass, "sensor", "next_outage")
+    assert entity_id.endswith("_next_outage")
+    assert hass.states.get(entity_id).attributes["friendly_name"] == (
+        f"{TITLE} Следующее отключение"
+    )
+    calendar = state(hass, "calendar", "outages")
+    assert calendar.attributes["message"] == "Отключение света"
+    assert calendar.attributes["description"] == "Очередь 3.1"
 
 
 async def test_late_timer_reports_both_edges(

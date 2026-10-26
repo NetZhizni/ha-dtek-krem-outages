@@ -32,7 +32,7 @@ custom_components/dtek_krem_outages/
   services.py        refresh, get_schedule (з response)
   diagnostics.py     діагностика (вулиця й будинок приховані)
   const.py           усі константи, дефолти опцій
-  strings.json, translations/en.json, translations/uk.json
+  strings.json, translations/en.json, translations/uk.json, translations/ru.json
   services.yaml, icons.json, manifest.json
   brand/             icon.png, icon@2x.png (HA роздає їх локально)
 tests/               pytest + pytest-homeassistant-custom-component; FakeDtek у conftest.py,
@@ -66,7 +66,7 @@ CI використовує Python 3.14; `ruff` налаштований на `p
 
 - Код, коментарі, докстрінги та логи — англійською. Докстрінги у стилі Google (ruff `D`), рядок 88, `from __future__ import annotations` у кожному модулі.
 - Константи тільки в `const.py` з `Final`.
-- Тексти UI: `strings.json` і `translations/en.json` мають бути ідентичними; `translations/uk.json` оновлювати разом з ними (це перевіряє `tests/test_manifest.py`). Помилки — через `translation_key`. Тексти календаря — `CALENDAR_TEXT` у `const.py` за мовою HA.
+- Тексти UI: `strings.json` і `translations/en.json` мають бути ідентичними; `translations/uk.json` і `translations/ru.json` оновлювати разом з ними (це перевіряє `tests/test_manifest.py`). Помилки — через `translation_key`. Тексти календаря — `CALENDAR_TEXT` у `const.py` за мовою з опції `language` (`LANGUAGES`).
 - README розділений за мовами: `README.md` — англійська (за замовчуванням, її показує HACS), `doc/README_uk.md` — українська. Обидва повні, з однаковою структурою й прикладами YAML; зміни поведінки відображати в обох. Посилання на українську версію в `README.md` — абсолютне (GitHub URL), бо HACS не розв'язує відносні шляхи.
 - Нова функціональність — з тестами в `tests/`. Запити до ДТЕК у тестах ідуть через `FakeDtek` (перевіряє справжній CSRF і семантику `updateFact`).
 

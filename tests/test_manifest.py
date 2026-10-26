@@ -26,7 +26,7 @@ def test_brand_icons_present() -> None:
 
 
 def test_translations_match() -> None:
-    """strings.json and en.json are identical; uk.json has the same keys."""
+    """strings.json and en.json are identical; uk.json, ru.json have its keys."""
 
     def keys(data: dict, prefix: str = "") -> set[str]:
         result = set()
@@ -40,8 +40,9 @@ def test_translations_match() -> None:
     english = json.loads(
         (INTEGRATION_DIR / "translations" / "en.json").read_text("utf-8")
     )
-    ukrainian = json.loads(
-        (INTEGRATION_DIR / "translations" / "uk.json").read_text("utf-8")
-    )
     assert strings == english
-    assert keys(strings) == keys(ukrainian)
+    for language in ("uk", "ru"):
+        translation = json.loads(
+            (INTEGRATION_DIR / "translations" / f"{language}.json").read_text("utf-8")
+        )
+        assert keys(strings) == keys(translation), language

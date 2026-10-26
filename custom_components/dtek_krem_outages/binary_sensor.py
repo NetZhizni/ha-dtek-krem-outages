@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import (
+    BinarySensorDeviceClass,
+    BinarySensorEntity,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
@@ -36,6 +39,10 @@ class ScheduledOutageBinarySensor(DtekEntity, BinarySensorEntity):
     The coordinator wakes up at every outage edge, so the state switches at
     the exact time and not only on the next update.
     """
+
+    # ``on`` means an outage, so a "problem" reads right in the UI and history
+    # ("Problem" / "OK"), where a plain on/off would read as "power on".
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
     def __init__(self, coordinator: DtekCoordinator) -> None:
         """Initialize the binary sensor."""
@@ -69,6 +76,8 @@ class AddressOutageBinarySensor(DtekEntity, BinarySensorEntity):
     This covers emergency and planned works too, which the group schedule
     doesn't show. Unavailable when the last request to DTEK failed.
     """
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
 
     def __init__(self, coordinator: DtekCoordinator) -> None:
         """Initialize the binary sensor."""

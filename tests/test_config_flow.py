@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from http import HTTPStatus
 from typing import Any
 
 import aiohttp
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.dtek_krem_outages.config_flow import (
     build_title,
@@ -36,6 +38,7 @@ from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.setup import async_setup_component
 
 from .conftest import GROUP, HOUSE, SETTLEMENT, STREET, TITLE, FakeDtek, setup_entry
 
@@ -262,12 +265,14 @@ async def test_unknown_values(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:
 async def test_cannot_connect_then_recovers(
     hass: HomeAssistant, fake_dtek: FakeDtek
 ) -> None:
-    """Connection errors show an error; submitting again retries."""
+    """Connection errors offer a retry; submitting again retries."""
     fake_dtek.ajax_error = aiohttp.ClientConnectionError()
     result = await start(hass)
-    assert result["errors"] == {"base": "cannot_connect"}
+    assert result["type"] is FlowResultType.MENU
+    assert result["step_id"] == "unreachable"
+    assert result["menu_options"] == ["user", "group_only"]
     fake_dtek.ajax_error = None
-    result = await submit(hass, result, {})
+    result = await submit(hass, result, {"next_step_id": "user"})
     assert result["step_id"] == "user"
     assert not result["errors"]
     result = await submit(hass, result, {CONF_SETTLEMENT: SETTLEMENT})
@@ -343,6 +348,53 @@ async def test_options_flow_reloads(
     assert coordinator.language == "en"
 
 
+async def test_forms_reach_frontend(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator, fake_dtek: FakeDtek
+) -> None:
+    """Every form goes through the HTTP API the frontend uses.
+
+    The API serializes the schema, which fails on a plain function in it.
+    """
+    assert await async_setup_component(hass, "config", {})
+    client = await hass_client()
+
+    async def post(path: str, data: dict[str, Any]) -> dict[str, Any]:
+        response = await client.post(f"/api/config/config_entries/{path}", json=data)
+        assert response.status == HTTPStatus.OK, await response.text()
+        await hass.async_block_till_done()
+        return await response.json()
+
+    result = await post("flow", {"handler": DOMAIN})
+    assert result["step_id"] == "user"
+    flow = f"flow/{result['flow_id']}"
+    result = await post(flow, {CONF_SETTLEMENT: SETTLEMENT})
+    assert result["step_id"] == "street"
+    result = await post(flow, {CONF_STREET: STREET})
+    assert result["step_id"] == "house"
+    result = await post(flow, {CONF_HOUSE: "8 а"})
+    assert result["step_id"] == "group"
+    result = await post(flow, {CONF_GROUP: "GPV4.2"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+
+    result = await post("options/flow", {"handler": entry.entry_id})
+    assert result["step_id"] == "init"
+    result = await post(
+        f"options/flow/{result['flow_id']}",
+        {
+            CONF_UPDATE_INTERVAL: 10,
+            CONF_WARN_START: ["5", "60"],
+            CONF_WARN_END: [],
+            CONF_USE_MIRROR: True,
+            CONF_SHOW_POSSIBLE: True,
+            CONF_LANGUAGE: "uk",
+        },
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_WARN_START] == [60, 5]
+    assert entry.options[CONF_WARN_END] == []
+
+
 async def test_reconfigure(
     hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -385,3 +437,131 @@ async def test_reconfigure_duplicate(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     assert mock_config_entry.data[CONF_HOUSE] == HOUSE
+
+
+async def test_group_only_when_dtek_is_down(
+    hass: HomeAssistant, fake_dtek: FakeDtek
+) -> None:
+    """Without DTEK the entry can follow a group with the mirror schedule."""
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+    result = await start(hass)
+    result = await submit(hass, result, {"next_step_id": "group_only"})
+    assert result["step_id"] == "group_only"
+    assert fields_of(result) == [CONF_GROUP, CONF_NAME, CONF_LANGUAGE]
+    result = await submit(hass, result, {CONF_GROUP: "GPV4.2", CONF_LANGUAGE: "uk"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Черга 4.2"
+    assert result["data"] == {CONF_GROUP: "GPV4.2", CONF_GROUP_MANUAL: True}
+    entry = result["result"]
+    assert entry.unique_id == "group|GPV4.2"
+    await hass.async_block_till_done()
+    assert entry.runtime_data.data.days
+
+    # The same group can't be added twice.
+    result = await start(hass)
+    result = await submit(hass, result, {"next_step_id": "group_only"})
+    result = await submit(hass, result, {CONF_GROUP: "GPV4.2", CONF_NAME: "Дача"})
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "group_configured"
+
+
+async def test_reconfigure_group_only_to_address(
+    hass: HomeAssistant, fake_dtek: FakeDtek
+) -> None:
+    """An entry by group gets an address once DTEK is back."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Черга 3.1",
+        unique_id="group|GPV3.1",
+        data={CONF_GROUP: GROUP, CONF_GROUP_MANUAL: True},
+        options=dict(DEFAULT_OPTIONS),
+    )
+    await setup_entry(hass, entry)
+    assert not entry.runtime_data.has_address
+
+    result = await entry.start_reconfigure_flow(hass)
+    result = await submit(hass, result, {CONF_SETTLEMENT: SETTLEMENT})
+    result = await submit(hass, result, {CONF_STREET: STREET})
+    result = await submit(hass, result, {CONF_HOUSE: HOUSE})
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.title == TITLE
+    assert entry.unique_id == f"{SETTLEMENT}|{STREET}|{HOUSE}"
+    assert entry.data[CONF_GROUP_MANUAL] is False
+    assert entry.runtime_data.has_address
+
+
+async def test_reconfigure_address_to_group_only(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """While DTEK is down, an address entry can switch to its group only."""
+    await setup_entry(hass, mock_config_entry)
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+    result = await mock_config_entry.start_reconfigure_flow(hass)
+    assert result["step_id"] == "unreachable"
+    result = await submit(hass, result, {"next_step_id": "group_only"})
+    # The language is an option; reconfiguring doesn't ask for it.
+    assert fields_of(result) == [CONF_GROUP, CONF_NAME]
+    result = await submit(hass, result, {CONF_GROUP: GROUP})
+    assert result["reason"] == "reconfigure_successful"
+    assert mock_config_entry.data == {CONF_GROUP: GROUP, CONF_GROUP_MANUAL: True}
+    # The title followed the address, so it follows the group now.
+    assert mock_config_entry.title == "Черга 3.1"
+
+
+async def test_options_of_group_only_entry(
+    hass: HomeAssistant, fake_dtek: FakeDtek
+) -> None:
+    """The backup source option is not offered when it is the only source."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Черга 3.1",
+        unique_id="group|GPV3.1",
+        data={CONF_GROUP: GROUP, CONF_GROUP_MANUAL: True},
+        options=dict(DEFAULT_OPTIONS),
+    )
+    await setup_entry(hass, entry)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert CONF_USE_MIRROR not in fields_of(result)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {
+            CONF_UPDATE_INTERVAL: 7,
+            CONF_WARN_START: [],
+            CONF_WARN_END: [],
+            CONF_SHOW_POSSIBLE: True,
+            CONF_LANGUAGE: "uk",
+        },
+    )
+    await hass.async_block_till_done()
+    assert entry.options[CONF_UPDATE_INTERVAL] == 7
+    assert entry.options[CONF_USE_MIRROR] is True
+
+
+async def test_menu_reaches_frontend(
+    hass: HomeAssistant, hass_client: ClientSessionGenerator, fake_dtek: FakeDtek
+) -> None:
+    """The menu and the group step go through the HTTP API too."""
+    assert await async_setup_component(hass, "config", {})
+    client = await hass_client()
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+
+    async def post(path: str, data: dict[str, Any]) -> dict[str, Any]:
+        response = await client.post(f"/api/config/config_entries/{path}", json=data)
+        assert response.status == HTTPStatus.OK, await response.text()
+        await hass.async_block_till_done()
+        return await response.json()
+
+    result = await post("flow", {"handler": DOMAIN})
+    assert result["type"] == FlowResultType.MENU
+    flow = f"flow/{result['flow_id']}"
+    result = await post(flow, {"next_step_id": "group_only"})
+    assert result["step_id"] == "group_only"
+    result = await post(flow, {CONF_GROUP: "GPV1.1", CONF_LANGUAGE: "en"})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["title"] == "Group 1.1"
+
+    # The options of an entry without an address have their own schema.
+    entry = hass.config_entries.async_entries(DOMAIN)[0]
+    result = await post("options/flow", {"handler": entry.entry_id})
+    assert result["step_id"] == "init"
+    assert CONF_USE_MIRROR not in [field["name"] for field in result["data_schema"]]

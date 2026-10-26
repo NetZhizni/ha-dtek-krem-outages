@@ -32,6 +32,7 @@ from homeassistant.helpers.selector import (
 
 from .api import DtekError, DtekNotFoundError, House, async_get_client
 from .const import (
+    CALENDAR_TEXT,
     CONF_GROUP,
     CONF_GROUP_MANUAL,
     CONF_HOUSE,
@@ -173,11 +174,29 @@ def build_unique_id(settlement: str, street: str, house: str) -> str:
     return f"{settlement}|{street}|{house}"
 
 
+def build_group_unique_id(group: str) -> str:
+    """Return the unique ID of an entry that follows a group without an address."""
+    return f"group|{group}"
+
+
 def build_title(settlement: str, street: str, house: str) -> str:
     """Generate an entry title like ``м. Бориспіль, вул. Нечая Івана, 43``."""
     if street.casefold() == "без вулиці":
         return f"{settlement}, {house}"
     return f"{settlement}, {street}, {house}"
+
+
+def build_group_title(group: str, language: str) -> str:
+    """Generate the title of an entry by group only, like ``Черга 3.1``."""
+    text = CALENDAR_TEXT.get(language, CALENDAR_TEXT[DEFAULT_LANGUAGE])
+    return f"{text['group']} {group_name(group)}"
+
+
+def _auto_title(data: Mapping[str, Any], language: str) -> str:
+    """Return the title an entry gets when the user gives no name."""
+    if all(data.get(key) for key in (CONF_SETTLEMENT, CONF_STREET, CONF_HOUSE)):
+        return build_title(data[CONF_SETTLEMENT], data[CONF_STREET], data[CONF_HOUSE])
+    return build_group_title(data[CONF_GROUP], language)
 
 
 def _select(options: list[str], *, custom_value: bool = True) -> SelectSelector:
@@ -210,25 +229,41 @@ def _checked(options: Mapping[str, Any], key: str) -> list[str]:
     return [str(minutes) for minutes in warning_thresholds(options, key)]
 
 
-def _warning_select(options: Mapping[str, Any], key: str) -> Any:
-    """Checkboxes of the warning minutes, plus any other minutes already saved."""
+def _warning_select(options: Mapping[str, Any], key: str) -> SelectSelector:
+    """Checkboxes of the warning minutes, plus any other minutes already saved.
+
+    The selector gives strings; ``async_step_init`` turns them into minutes.
+    The schema holds no plain function for that, because the frontend gets the
+    schema serialized and a function cannot be.
+    """
     minutes = sorted({*WARNING_CHOICES, *warning_thresholds(options, key)})
-    return vol.All(
-        SelectSelector(
-            SelectSelectorConfig(
-                options=[str(m) for m in minutes],
-                multiple=True,
-                mode=SelectSelectorMode.LIST,
-                translation_key="warning_minutes",
-            )
-        ),
-        lambda value: sorted({int(m) for m in value}, reverse=True),
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[str(m) for m in minutes],
+            multiple=True,
+            mode=SelectSelectorMode.LIST,
+            translation_key="warning_minutes",
+        )
     )
 
 
-def _options_schema(options: Mapping[str, Any]) -> dict[vol.Marker, Any]:
+def _group_select(choices: list[str]) -> SelectSelector:
+    """A dropdown of groups labelled like people say them: ``3.1``."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                SelectOptionDict(value=g, label=group_name(g) or g) for g in choices
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _options_schema(
+    options: Mapping[str, Any], *, has_address: bool = True
+) -> dict[vol.Marker, Any]:
     values = {**DEFAULT_OPTIONS, **options}
-    return {
+    schema: dict[vol.Marker, Any] = {
         vol.Required(
             CONF_UPDATE_INTERVAL, default=values[CONF_UPDATE_INTERVAL]
         ): vol.All(
@@ -259,10 +294,18 @@ def _options_schema(options: Mapping[str, Any]) -> dict[vol.Marker, Any]:
             _language_select(), vol.In(LANGUAGES)
         ),
     }
+    if not has_address:
+        # Without an address the mirror is the only source anyway.
+        del schema[CONF_USE_MIRROR]
+    return schema
 
 
 class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Choose an address step by step: settlement, street, house, group."""
+    """Choose an address step by step: settlement, street, house, group.
+
+    When DTEK can't be reached, the entry can follow a group without an
+    address instead; its schedule then comes from the mirror.
+    """
 
     VERSION = 1
     MINOR_VERSION = 1
@@ -295,7 +338,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._streets = await client.async_get_streets()
             except DtekError as err:
                 _LOGGER.debug("Cannot load the streets from DTEK: %s", err)
-                errors["base"] = "cannot_connect"
+                return await self.async_step_unreachable()
             except Exception:
                 _LOGGER.exception("Unexpected error while loading the streets")
                 errors["base"] = "unknown"
@@ -330,6 +373,14 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_unreachable(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Try DTEK again, or follow a group with the schedule from the mirror."""
+        return self.async_show_menu(
+            step_id="unreachable", menu_options=["user", "group_only"]
         )
 
     async def async_step_street(
@@ -439,22 +490,47 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="group",
             data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_GROUP, default=choices[0]): SelectSelector(
-                        SelectSelectorConfig(
-                            options=[
-                                SelectOptionDict(value=g, label=group_name(g) or g)
-                                for g in choices
-                            ],
-                            mode=SelectSelectorMode.DROPDOWN,
-                        )
-                    )
-                }
+                {vol.Required(CONF_GROUP, default=choices[0]): _group_select(choices)}
             ),
             description_placeholders={
                 **self._placeholders(),
                 "groups": ", ".join(group_name(g) or g for g in self._groups) or "—",
             },
+        )
+
+    async def async_step_group_only(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Follow a group without an address; the mirror gives the schedule."""
+        if user_input is not None and user_input.get(CONF_GROUP) in GROUPS:
+            self._name = (user_input.get(CONF_NAME) or "").strip() or None
+            if user_input.get(CONF_LANGUAGE) in LANGUAGES:
+                self._language = user_input[CONF_LANGUAGE]
+            group = user_input[CONF_GROUP]
+            return await self._async_save(
+                {CONF_GROUP: group, CONF_GROUP_MANUAL: True},
+                build_group_unique_id(group),
+            )
+
+        current = (
+            self._get_reconfigure_entry().data.get(CONF_GROUP)
+            if self.source == SOURCE_RECONFIGURE
+            else None
+        )
+        schema: dict[vol.Marker, Any] = {
+            vol.Required(
+                CONF_GROUP, default=current if current in GROUPS else GROUPS[0]
+            ): _group_select(list(GROUPS)),
+            vol.Optional(
+                CONF_NAME, description={"suggested_value": self._name}
+            ): TextSelector(),
+        }
+        if self.source != SOURCE_RECONFIGURE:
+            schema[vol.Required(CONF_LANGUAGE, default=self._language)] = (
+                _language_select()
+            )
+        return self.async_show_form(
+            step_id="group_only", data_schema=vol.Schema(schema)
         )
 
     def _placeholders(self) -> dict[str, str]:
@@ -475,34 +551,42 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_GROUP: group,
             CONF_GROUP_MANUAL: manual,
         }
-        unique_id = build_unique_id(settlement, street, house)
-        auto_title = build_title(settlement, street, house)
+        return await self._async_save(data, build_unique_id(settlement, street, house))
 
-        if self.source != SOURCE_RECONFIGURE:
+    async def _async_save(
+        self, data: dict[str, Any], unique_id: str
+    ) -> ConfigFlowResult:
+        """Create the entry, or update the one being reconfigured."""
+        reason = "already_configured" if CONF_HOUSE in data else "group_configured"
+        reconfigured = (
+            self._get_reconfigure_entry() if self.source == SOURCE_RECONFIGURE else None
+        )
+        if any(
+            other.unique_id == unique_id
+            and (reconfigured is None or other.entry_id != reconfigured.entry_id)
+            for other in self._async_current_entries(include_ignore=False)
+        ):
+            return self.async_abort(reason=reason)
+
+        if reconfigured is None:
             await self.async_set_unique_id(unique_id)
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
-                title=self._name or auto_title,
+                title=self._name or _auto_title(data, self._language),
                 data=data,
                 options={**DEFAULT_OPTIONS, CONF_LANGUAGE: self._language},
             )
 
-        entry = self._get_reconfigure_entry()
-        if any(
-            other.unique_id == unique_id and other.entry_id != entry.entry_id
-            for other in self._async_current_entries(include_ignore=False)
+        language = reconfigured.options.get(CONF_LANGUAGE, DEFAULT_LANGUAGE)
+        title = self._name or reconfigured.title
+        if not self._name and reconfigured.title == _auto_title(
+            reconfigured.data, language
         ):
-            return self.async_abort(reason="already_configured")
-        title = self._name or entry.title
-        old_title = build_title(
-            entry.data[CONF_SETTLEMENT], entry.data[CONF_STREET], entry.data[CONF_HOUSE]
-        )
-        if not self._name and entry.title == old_title:
-            title = auto_title
+            title = _auto_title(data, language)
         # The coordinator notices the new address or group in its Store and
         # starts over with a silent baseline.
         return self.async_update_reload_and_abort(
-            entry, unique_id=unique_id, title=title, data=data
+            reconfigured, unique_id=unique_id, title=title, data=data
         )
 
     async def async_step_reconfigure(
@@ -510,9 +594,9 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Change the address or group of an entry."""
         entry = self._get_reconfigure_entry()
-        self._settlement = entry.data[CONF_SETTLEMENT]
-        self._street = entry.data[CONF_STREET]
-        self._house = entry.data[CONF_HOUSE]
+        self._settlement = entry.data.get(CONF_SETTLEMENT)
+        self._street = entry.data.get(CONF_STREET)
+        self._house = entry.data.get(CONF_HOUSE)
         return await self.async_step_user()
 
 
@@ -523,14 +607,20 @@ class DtekKremOptionsFlow(OptionsFlowWithReload):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage the options."""
+        options = self.config_entry.options
         if user_input is not None:
-            return self.async_create_entry(
-                data={
-                    key: user_input.get(key, value)
-                    for key, value in DEFAULT_OPTIONS.items()
-                }
-            )
+            data = {
+                key: user_input.get(key, options.get(key, value))
+                for key, value in DEFAULT_OPTIONS.items()
+            }
+            for key in (CONF_WARN_START, CONF_WARN_END):
+                data[key] = list(warning_thresholds(data, key))
+            return self.async_create_entry(data=data)
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(_options_schema(self.config_entry.options)),
+            data_schema=vol.Schema(
+                _options_schema(
+                    options, has_address=CONF_HOUSE in self.config_entry.data
+                )
+            ),
         )

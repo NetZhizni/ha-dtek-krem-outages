@@ -9,6 +9,11 @@ The schedule is merged into the stored one instead of replacing it: what
 already happened is kept as it was, the future follows the newest data. The
 result is saved in a Store, so a restart or an outage of both sources keeps
 the last known schedule working.
+
+The ``show*`` flags of the answer are followed like the DTEK page follows
+them: a hidden daily schedule clears the days from now on, a hidden weekly
+schedule is left out of the calendar. An entry set up by group only has no
+address to ask DTEK about and takes the schedule from the mirror.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 import logging
 import math
+import random
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -32,11 +38,14 @@ from homeassistant.util import dt as dt_util
 
 from .api import (
     AddressOutage,
+    DtekBlockedError,
     DtekClient,
     DtekError,
     Fact,
     House,
     Preset,
+    Publication,
+    find_house,
     preset_from_dict,
 )
 from .const import (
@@ -51,6 +60,11 @@ from .const import (
     CONF_USE_MIRROR,
     CONF_WARN_END,
     CONF_WARN_START,
+    CONNECTION_MIRROR,
+    CONNECTION_OFFLINE,
+    CONNECTION_OK,
+    DATA_CURRENT,
+    DATA_STALE,
     DEFAULT_LANGUAGE,
     DEFAULT_SHOW_POSSIBLE,
     DEFAULT_UPDATE_INTERVAL,
@@ -69,6 +83,8 @@ from .const import (
     HISTORY_DAYS,
     LANGUAGES,
     MIN_UPDATE_INTERVAL,
+    RETRY_JITTER,
+    RETRY_MAX_INTERVAL,
     SOURCE_DTEK,
     SOURCE_MIRROR,
     SOURCE_STORAGE,
@@ -80,6 +96,7 @@ from .const import (
     warning_thresholds,
 )
 from .schedule import (
+    ALL_ON,
     SLOT_MAYBE,
     DayChange,
     Interval,
@@ -143,6 +160,24 @@ class DtekData:
     fetch_ok: bool = False
     last_success: datetime | None = None
     last_error: str | None = None
+    connection: str = CONNECTION_OFFLINE
+    consecutive_failures: int = 0
+    last_dtek_success: datetime | None = None
+    blocked: bool = False
+    publication: Publication = field(default_factory=Publication)
+    external_operator: bool = False
+
+    @property
+    def data_status(self) -> str:
+        """Return ``current`` if the last update confirmed the schedule."""
+        return DATA_CURRENT if self.fetch_ok else DATA_STALE
+
+    def freshness(self) -> dict[str, Any]:
+        """Return the attributes telling how fresh the schedule is."""
+        return {
+            "data_status": self.data_status,
+            "last_verified_at": _isoformat(self.last_success),
+        }
 
     def current_outage(self, now: datetime) -> Interval | None:
         """Return the scheduled outage in progress."""
@@ -167,18 +202,21 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             int(options.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL)),
             MIN_UPDATE_INTERVAL,
         )
+        self._base_interval = timedelta(minutes=interval)
         super().__init__(
             hass,
             _LOGGER,
             config_entry=entry,
             name=f"{DOMAIN} {entry.title}",
-            update_interval=timedelta(minutes=interval),
+            update_interval=self._base_interval,
         )
         self.client = client
         self.tz = client.tz
-        self.settlement: str = entry.data[CONF_SETTLEMENT]
-        self.street: str = entry.data[CONF_STREET]
-        self.house: str = entry.data[CONF_HOUSE]
+        # None for an entry set up by group only.
+        self.settlement: str | None = entry.data.get(CONF_SETTLEMENT)
+        self.street: str | None = entry.data.get(CONF_STREET)
+        self.house: str | None = entry.data.get(CONF_HOUSE)
+        self.has_address = bool(self.settlement and self.street and self.house)
         self.group: str = entry.data[CONF_GROUP]
         self.group_manual: bool = bool(entry.data.get(CONF_GROUP_MANUAL, False))
         self.warn_start = tuple(
@@ -210,8 +248,16 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._fetch_ok = False
         self._groups_at_address: list[str] = []
         self._house_missing_logged = False
+        self._external_operator = False
+        self._publication = Publication()
         self._last_success: datetime | None = None
+        self._last_dtek_success: datetime | None = None
         self._last_error: str | None = None
+        self._connection = CONNECTION_OFFLINE
+        self._blocked = False
+        # Updates in a row without the main source (DTEK, or the mirror for
+        # an entry without an address); they stretch the update interval.
+        self._failures = 0
         self._warned: set[str] = set()
         # False until a schedule was recorded once: the first update is silent.
         self._has_baseline = False
@@ -225,7 +271,9 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
 
     @property
     def address_key(self) -> str:
-        """Return the address the stored state belongs to."""
+        """Return the address the stored state belongs to; empty without one."""
+        if not self.has_address:
+            return ""
         return f"{self.settlement}|{self.street}|{self.house}"
 
     async def _async_setup(self) -> None:
@@ -240,6 +288,9 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             return
         self._days = _parse_days(stored.get("days"))
         self._last_success = _parse_iso(stored.get("last_success"))
+        self._last_dtek_success = _parse_iso(stored.get("last_dtek_success"))
+        self._publication = Publication.from_dict(stored.get("publication"))
+        self._external_operator = bool(stored.get("external_operator"))
         if stored.get("group") != self.group:
             today, _ = slot_at(dt_util.utcnow(), self.tz)
             self._days = {day: s for day, s in self._days.items() if day <= today}
@@ -268,8 +319,11 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             if self._address_outage
             else None,
             "groups_at_address": self._groups_at_address,
+            "external_operator": self._external_operator,
+            "publication": self._publication.as_dict(),
             "warned": sorted(self._warned),
             "last_success": _isoformat(self._last_success),
+            "last_dtek_success": _isoformat(self._last_dtek_success),
         }
 
     # -- update ------------------------------------------------------------
@@ -282,31 +336,30 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         preset: Preset | None = None
         source = SOURCE_DTEK
 
-        dtek_ok = False
-        try:
-            fact, preset = await self._async_fetch_dtek()
-        except DtekError as err:
-            errors.append(f"DTEK: {err}")
-            self._address_ok = False
-        else:
-            dtek_ok = True
-
-        mirror_ok = False
-        if not dtek_ok and self.use_mirror:
+        dtek_ok = mirror_ok = False
+        self._blocked = False
+        if self.has_address:
             try:
-                mirror = await self.client.async_get_mirror()
+                fact, preset = await self._async_fetch_dtek()
+            except DtekError as err:
+                errors.append(f"DTEK: {err}")
+                self._address_ok = False
+                self._blocked = isinstance(err, DtekBlockedError)
+            else:
+                dtek_ok = True
+                self._last_dtek_success = now
+
+        # Without an address the mirror is the only source, whatever the option.
+        if not dtek_ok and (self.use_mirror or not self.has_address):
+            try:
+                fact, preset = await self._async_fetch_mirror()
             except DtekError as err:
                 errors.append(f"mirror: {err}")
             else:
                 mirror_ok = True
                 source = SOURCE_MIRROR
-                if mirror.fact is not None and self._is_newer(mirror.fact):
-                    fact = mirror.fact
-                if mirror.preset is not None and (
-                    not self._preset or mirror.preset.update != self._preset_update
-                ):
-                    preset = mirror.preset
 
+        self._track_connection(dtek_ok, mirror_ok)
         if not dtek_ok and not mirror_ok and not self._has_baseline:
             raise UpdateFailed(
                 translation_domain=DOMAIN,
@@ -314,13 +367,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
                 translation_placeholders={"error": "; ".join(errors)},
             )
 
-        changed = False
-        if fact is not None:
-            changed = self._apply_fact(fact, source, now)
-        if preset is not None and (group_preset := preset.for_group(self.group)):
-            self._preset = group_preset
-            self._preset_update = preset.update
-
+        changed = self._apply_schedule(fact, preset, source, now, from_dtek=dtek_ok)
         self._fetch_ok = dtek_ok or mirror_ok
         if self._fetch_ok:
             self._last_success = now
@@ -339,17 +386,86 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._schedule_timer(now)
         return self._snapshot()
 
+    def _apply_schedule(
+        self,
+        fact: Fact | None,
+        preset: Preset | None,
+        source: str,
+        now: datetime,
+        *,
+        from_dtek: bool,
+    ) -> bool:
+        """Take a new schedule; True if it changed and needs saving now."""
+        changed = False
+        if from_dtek and self._publication.daily_hidden:
+            changed = self._hide_daily(fact, now)
+        elif fact is not None:
+            changed = self._apply_fact(fact, source, now)
+        if preset is not None and (group_preset := preset.for_group(self.group)):
+            self._preset = group_preset
+            self._preset_update = preset.update
+        return changed
+
+    async def _async_fetch_mirror(self) -> tuple[Fact | None, Preset | None]:
+        """Return what the mirror has newer than the applied schedule."""
+        mirror = await self.client.async_get_mirror()
+        fact = preset = None
+        # The mirror copies the schedule even while DTEK hides it.
+        if (
+            mirror.fact is not None
+            and not self._publication.daily_hidden
+            and self._is_newer(mirror.fact)
+        ):
+            fact = mirror.fact
+        if mirror.preset is not None and (
+            not self._preset or mirror.preset.update != self._preset_update
+        ):
+            preset = mirror.preset
+        return fact, preset
+
+    def _track_connection(self, dtek_ok: bool, mirror_ok: bool) -> None:
+        """Record what answered and stretch the interval after failures."""
+        main_ok = dtek_ok if self.has_address else mirror_ok
+        self._failures = 0 if main_ok else self._failures + 1
+        self.update_interval = self._next_interval()
+        if dtek_ok:
+            self._connection = CONNECTION_OK
+        elif mirror_ok:
+            self._connection = CONNECTION_MIRROR
+        else:
+            self._connection = CONNECTION_OFFLINE
+
+    def _next_interval(self) -> timedelta:
+        """Return the update interval, doubled for every failed update in a row.
+
+        It grows up to RETRY_MAX_INTERVAL minutes (or the configured interval
+        if longer) with jitter, and is back to normal after a success.
+        """
+        if not self._failures:
+            return self._base_interval
+        longest = max(self._base_interval, timedelta(minutes=RETRY_MAX_INTERVAL))
+        delay = min(self._base_interval * 2 ** min(self._failures - 1, 8), longest)
+        return delay * random.uniform(1 - RETRY_JITTER, 1 + RETRY_JITTER)  # noqa: S311
+
     async def _async_fetch_dtek(self) -> tuple[Fact | None, Preset | None]:
         """Ask DTEK for the street; follow a group change of the house."""
+        settlement, street_name = self.settlement or "", self.street or ""
         street = await self.client.async_get_street(
-            self.settlement, self.street, self._fact_update or FORCE_UPDATE_FACT
+            settlement, street_name, self._fact_update or FORCE_UPDATE_FACT
         )
         self._address_ok = True
-        if self._apply_house(street.houses.get(self.house)):
-            # The new group needs the whole schedule, not only changes.
+        was_hidden = self._publication.daily_hidden
+        self._publication = street.publication
+        # The new group needs the whole schedule, not only changes.
+        refetch = self._apply_house(find_house(street.houses, self.house or ""))
+        if was_hidden and not self._publication.daily_hidden and street.fact is None:
+            # Shown again: the days cleared meanwhile need the whole schedule.
+            refetch = True
+        if refetch:
             street = await self.client.async_get_street(
-                self.settlement, self.street, FORCE_UPDATE_FACT
+                settlement, street_name, FORCE_UPDATE_FACT
             )
+            self._publication = street.publication
         return street.fact, street.preset
 
     def _is_newer(self, fact: Fact) -> bool:
@@ -378,6 +494,32 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             self._queue_schedule_event(change, today)
         return bool(changes) or version_changed
 
+    def _hide_daily(self, fact: Fact | None, now: datetime) -> bool:
+        """Clear the schedule from now on while DTEK hides it.
+
+        The DTEK page doesn't show the schedule then, so the entities don't
+        either; finished slots stay as history. The version is still recorded,
+        the schedule is asked for again once it is shown.
+        """
+        today, current_slot = slot_at(now, self.tz)
+        cleared = {day: ALL_ON for day in self._days if day >= today}
+        merged = merge_days(self._days, cleared, today, current_slot)
+        changes = (
+            future_changes(self._days, merged, today, current_slot)
+            if self._has_baseline
+            else []
+        )
+        self._days = merged
+        version_changed = False
+        if fact is not None:
+            version_changed = fact.update != self._fact_update
+            self._fact_update = fact.update
+            self._fact_updated_at = fact.updated_at
+            self._source = SOURCE_DTEK
+        for change in changes:
+            self._queue_schedule_event(change, today)
+        return bool(changes) or version_changed
+
     def _apply_house(self, house: House | None) -> bool:
         """Take the group and outage of the address; True if the group changed."""
         if house is None:
@@ -392,11 +534,24 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
                 self._house_missing_logged = True
             groups: list[str] = []
             outage = None
+            external = False
         else:
             self._house_missing_logged = False
             groups = house.groups
-            outage = house.outage
+            # The page leaves the outage of the house out when told so.
+            outage = (
+                house.outage if self._publication.current_outage is not False else None
+            )
+            external = house.external
 
+        if external and not self._external_operator:
+            _LOGGER.warning(
+                "%s: DTEK says house %s is served by another operator; "
+                "the DTEK schedule may not apply to it",
+                self.config_entry.title,
+                self.house,
+            )
+        self._external_operator = external
         self._groups_at_address = list(groups)
         self._update_address_outage(outage)
 
@@ -476,6 +631,12 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             fetch_ok=self._fetch_ok,
             last_success=self._last_success,
             last_error=self._last_error,
+            connection=self._connection,
+            consecutive_failures=self._failures,
+            last_dtek_success=self._last_dtek_success,
+            blocked=self._blocked,
+            publication=self._publication,
+            external_operator=self._external_operator,
         )
 
     # -- time based events -----------------------------------------------
@@ -734,9 +895,14 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             "group": data.group,
             "group_name": group_name(data.group),
             "groups_at_address": data.groups_at_address,
+            "external_operator": data.external_operator,
             "schedule_updated": _isoformat(data.fact_updated_at),
             "source": data.source,
+            "connection": data.connection,
+            "data_status": data.data_status,
+            "publication": data.publication.as_dict(),
             "last_success": _isoformat(data.last_success),
+            "last_dtek_success": _isoformat(data.last_dtek_success),
             "last_error": data.last_error,
             "days": days,
             "weekly": {str(day): slots for day, slots in sorted(data.preset.items())},

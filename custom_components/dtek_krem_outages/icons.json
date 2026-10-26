@@ -25,6 +25,21 @@
       }
     },
     "sensor": {
+      "address_status": {
+        "default": "mdi:home-lightning-bolt-outline",
+        "state": {
+          "none": "mdi:home-outline",
+          "emergency": "mdi:alert-outline",
+          "planned": "mdi:tools"
+        }
+      },
+      "connection": {
+        "default": "mdi:cloud-check-outline",
+        "state": {
+          "mirror": "mdi:cloud-sync-outline",
+          "offline": "mdi:cloud-off-outline"
+        }
+      },
       "group": {
         "default": "mdi:format-list-numbered"
       },
@@ -42,6 +57,9 @@
       },
       "outages_tomorrow": {
         "default": "mdi:timer-sand"
+      },
+      "restoration": {
+        "default": "mdi:power-plug-outline"
       },
       "schedule_updated": {
         "default": "mdi:update"

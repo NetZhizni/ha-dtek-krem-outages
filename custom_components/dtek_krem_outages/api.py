@@ -20,7 +20,14 @@ Facts verified against the live site on 2026-10-18 (samples in tests/fixtures):
   current outage, ``""`` when there is none), ``start_date``/``end_date``
   (``"HH:MM dd.mm.YYYY"`` or ``""``), ``type`` (``"2"`` or ``""``),
   ``sub_type_reason`` (groups: usually one, sometimes none or several) and
-  ``voluntarily``/``cek`` (always null so far). ``fact`` and ``preset`` are
+  ``voluntarily``/``cek`` (always null so far; on other DTEK sites a truthy
+  ``cek`` marks a house served by another operator). Other DTEK sites
+  sometimes give a list of such objects for one house, one per outage. Next
+  to ``data`` come the ``show*`` flags the page uses to decide what to show:
+  ``showTableFact`` (the schedule for today and tomorrow), ``showTablePlan``
+  (the weekly schedule of possible outages; ``false`` on 2026-10-18),
+  ``showTableSchedule`` (the schedule block at all) and ``showCurOutageParam``
+  (the current outage of the house). ``fact`` and ``preset`` are
   added only when ``updateFact`` is truthy in PHP (``""`` and ``"0"`` are
   not) and differs from the current ``fact.update`` (``"dd.mm.YYYY HH:MM"``),
   so that value works as a version.
@@ -66,6 +73,7 @@ from .const import (
     OUTAGE_KIND_EMERGENCY,
     OUTAGE_KIND_OTHER,
     OUTAGE_KIND_PLANNED,
+    OUTAGE_KIND_SEVERITY,
     OUTAGE_KIND_STABILIZATION,
     PROJECT_URL,
     SITE_AJAX_PATH,
@@ -222,6 +230,31 @@ def _parse_iso(value: Any) -> datetime | None:
         return None
 
 
+def _parse_outage(raw: Mapping[str, Any], tz: tzinfo) -> AddressOutage | None:
+    """Return the outage of one ``getHomeNum`` record, None without a reason."""
+    if not (reason := _as_str(raw.get("sub_type"))):
+        return None
+    return AddressOutage(
+        reason=reason,
+        kind=classify_reason(reason),
+        start=parse_local_datetime(raw.get("start_date"), HOUSE_DATE_FORMAT, tz),
+        end=parse_local_datetime(raw.get("end_date"), HOUSE_DATE_FORMAT, tz),
+        type=_as_str(raw.get("type")),
+    )
+
+
+def _primary_outage(outages: list[AddressOutage]) -> AddressOutage | None:
+    """Return the most severe outage; the latest start wins a tie."""
+    return max(
+        outages,
+        key=lambda o: (
+            OUTAGE_KIND_SEVERITY.get(o.kind, 0),
+            o.start.timestamp() if o.start is not None else float("-inf"),
+        ),
+        default=None,
+    )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class House:
     """A house of a street with its groups and current outage."""
@@ -229,28 +262,108 @@ class House:
     number: str
     groups: list[str] = field(default_factory=list)
     outage: AddressOutage | None = None
+    # DTEK says another operator serves the house (``cek``).
+    external: bool = False
 
     @classmethod
-    def from_api(cls, number: str, raw: Mapping[str, Any], tz: tzinfo) -> House:
-        """Build a house from a ``getHomeNum`` item."""
-        reasons = raw.get("sub_type_reason")
-        groups = [
-            group
-            for group in (reasons if isinstance(reasons, list) else [])
-            if group in GROUPS
-        ]
-        outage = None
-        if reason := _as_str(raw.get("sub_type")):
-            outage = AddressOutage(
-                reason=reason,
-                kind=classify_reason(reason),
-                start=parse_local_datetime(
-                    raw.get("start_date"), HOUSE_DATE_FORMAT, tz
-                ),
-                end=parse_local_datetime(raw.get("end_date"), HOUSE_DATE_FORMAT, tz),
-                type=_as_str(raw.get("type")),
-            )
-        return cls(number=number, groups=groups, outage=outage)
+    def from_api(cls, number: str, raw: Any, tz: tzinfo) -> House | None:
+        """Build a house from a ``getHomeNum`` item: one record or a list.
+
+        A list holds one record per outage; the groups of all of them count
+        and the most severe outage is the one reported.
+        """
+        records = [raw] if isinstance(raw, Mapping) else raw
+        if not isinstance(records, list):
+            return None
+        records = [r for r in records if isinstance(r, Mapping)]
+        if not records:
+            return None
+        groups: list[str] = []
+        for record in records:
+            reasons = record.get("sub_type_reason")
+            for group in reasons if isinstance(reasons, list) else []:
+                if group in GROUPS and group not in groups:
+                    groups.append(group)
+        outages = [o for r in records if (o := _parse_outage(r, tz)) is not None]
+        return cls(
+            number=number,
+            groups=groups,
+            outage=_primary_outage(outages),
+            external=any(bool(r.get("cek")) for r in records),
+        )
+
+
+# Latin letters typed instead of the Cyrillic ones that look the same.
+_HOUSE_LOOKALIKES = str.maketrans("aceiopxkmhtby", "асеіорхкмнтву")
+
+
+def _house_key(number: str) -> str:
+    return "".join(number.split()).casefold().translate(_HOUSE_LOOKALIKES)
+
+
+def find_house(houses: Mapping[str, House], number: str) -> House | None:
+    """Return the house ``number``, tolerating case, spaces and Latin letters.
+
+    DTEK has written the same house as ``8а`` and ``8 а``; the exact key wins.
+    """
+    if (house := houses.get(number)) is not None:
+        return house
+    wanted = _house_key(number)
+    matches = [house for key, house in houses.items() if _house_key(key) == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _flag(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Publication:
+    """What the DTEK page shows for a street; None means not known.
+
+    The flags come with every ``getHomeNum`` answer, the mirror has none.
+    """
+
+    schedule: bool | None = None  # showTableSchedule
+    daily: bool | None = None  # showTableFact
+    weekly: bool | None = None  # showTablePlan
+    current_outage: bool | None = None  # showCurOutageParam
+
+    @property
+    def daily_hidden(self) -> bool:
+        """Return True when DTEK hides the schedule for today and tomorrow."""
+        return self.schedule is False or self.daily is False
+
+    @classmethod
+    def from_api(cls, payload: Mapping[str, Any]) -> Publication:
+        """Read the ``show*`` flags of a ``getHomeNum`` answer."""
+        return cls(
+            schedule=_flag(payload.get("showTableSchedule")),
+            daily=_flag(payload.get("showTableFact")),
+            weekly=_flag(payload.get("showTablePlan")),
+            current_outage=_flag(payload.get("showCurOutageParam")),
+        )
+
+    def as_dict(self) -> dict[str, bool | None]:
+        """Return a JSON serializable form."""
+        return {
+            "schedule": self.schedule,
+            "daily": self.daily,
+            "weekly": self.weekly,
+            "current_outage": self.current_outage,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Publication:
+        """Restore flags saved with ``as_dict``."""
+        if not isinstance(data, Mapping):
+            return cls()
+        return cls(
+            schedule=_flag(data.get("schedule")),
+            daily=_flag(data.get("daily")),
+            weekly=_flag(data.get("weekly")),
+            current_outage=_flag(data.get("current_outage")),
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -353,6 +466,7 @@ class StreetData:
     houses: dict[str, House] = field(default_factory=dict)
     fact: Fact | None = None
     preset: Preset | None = None
+    publication: Publication = field(default_factory=Publication)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -451,12 +565,15 @@ class DtekClient:
         data = payload.get("data")
         if isinstance(data, Mapping):
             for number, raw in data.items():
-                if isinstance(number, str) and isinstance(raw, Mapping):
-                    houses[number] = House.from_api(number, raw, self.tz)
+                if isinstance(number, str) and (
+                    house := House.from_api(number, raw, self.tz)
+                ):
+                    houses[number] = house
         return StreetData(
             houses=houses,
             fact=Fact.from_api(payload.get("fact"), self.tz),
             preset=Preset.from_api(payload.get("preset")),
+            publication=Publication.from_api(payload),
         )
 
     async def async_get_mirror(self) -> MirrorData:

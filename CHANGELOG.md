@@ -3,6 +3,25 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-10-18
+
+### Added
+- Entry by group only: when DTEK can't be reached while adding the integration, it offers to try again or to follow a group without an address, with the schedule from the mirror. Reconfigure adds the address later (or switches an address entry to its group while DTEK is down).
+- `sensor.…_dtek_connection` (diagnostic): `ok`, `mirror` or `offline`, with the last successes, failures in a row, the current interval, whether DTEK answered with the anti-bot challenge and whether DTEK shows the daily and weekly schedules.
+- `sensor.…_address_status` (`none` / `stabilization` / `emergency` / `planned` / `other`) and `sensor.…_estimated_restoration` for the outage DTEK reports for the house.
+- `data_status` (`current` / `stale`) and `last_verified_at` attributes on the entities computed from the schedule and on the calendar.
+- `external_operator` attribute and a log warning when DTEK says another operator serves the house (`cek`).
+
+### Changed
+- The `show*` flags of the DTEK answer are followed like the website follows them. While the weekly schedule is hidden (`showTablePlan: false`, as on 2026-10-18), the calendar doesn't fill days with possible outages. While the schedule of the day is hidden (`showTableFact` / `showTableSchedule`), the days from now on are cleared with a `schedule_changed` event, the mirror copy is not used, and the whole schedule is asked for once it is shown again. Without `showCurOutageParam` the outage of the house is left out.
+- After failed requests the update interval doubles up to 15 minutes (or the configured interval if longer), with jitter, and is back to normal after a success.
+- README is Ukrainian by default; the English version moved to `doc/README_en.md`. Both have a comparison with groove-max/ha-dtek-monitor and aavdberg/ha-dtek, a troubleshooting table and new examples.
+
+### Fixed
+- A house that DTEK lists as several records (one per outage) was dropped and looked missing. Its groups are merged and the most severe outage is reported.
+- The house is found when DTEK changes its spelling only in case, spaces or Latin look-alike letters.
+- The options did not open (`500 Internal Server Error`, `ValueError: unable to serialize schema` in the log): the warning checkboxes turned the ticked minutes into numbers with a function inside the form schema, which Home Assistant cannot send to the frontend. The options step converts them now.
+
 ## [0.1.2] - 2026-10-18
 
 ### Fixed

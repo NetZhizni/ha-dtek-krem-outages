@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.core import HomeAssistant
@@ -35,8 +36,9 @@ class OutageCalendar(DtekEntity, CalendarEntity):
     """Scheduled outages, possible outages and works reported for the address.
 
     Days without an actual schedule show the weekly schedule of possible
-    outages when that option is on. Stabilization outages reported for the
-    address are left out: the schedule already shows them.
+    outages when that option is on and DTEK shows that schedule itself.
+    Stabilization outages reported for the address are left out: the
+    schedule already shows them.
     """
 
     def __init__(self, coordinator: DtekCoordinator) -> None:
@@ -62,7 +64,12 @@ class OutageCalendar(DtekEntity, CalendarEntity):
             )
             for item in intervals(data.days, tz, (SLOT_OFF, SLOT_MAYBE))
         ]
-        if coordinator.show_possible and data.preset:
+        # ``showTablePlan: false``: the DTEK page hides the weekly schedule.
+        if (
+            coordinator.show_possible
+            and data.preset
+            and data.publication.weekly is not False
+        ):
             today, _ = slot_at(dt_util.utcnow(), tz)
             weekly = possible_days(data.preset, today, POSSIBLE_DAYS_AHEAD, data.days)
             events.extend(
@@ -95,12 +102,19 @@ class OutageCalendar(DtekEntity, CalendarEntity):
                     location=(
                         f"{coordinator.settlement}, {coordinator.street}, "
                         f"{coordinator.house}"
+                        if coordinator.has_address
+                        else None
                     ),
                     uid=f"{coordinator.config_entry.entry_id}-address-"
                     f"{outage.start.isoformat()}",
                 )
             )
         return sorted(events, key=lambda e: e.start_datetime_local)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return how fresh the schedule is."""
+        return self.coordinator.data.freshness()
 
     @property
     def event(self) -> CalendarEvent | None:

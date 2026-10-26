@@ -159,7 +159,7 @@ class FakeDtek:
             SETTLEMENT: [STREET, "вул. Київський Шлях"],
             "с. Буча": ["Без вулиці"],
         }
-        self.houses: dict[str, dict[str, Any]] = {
+        self.houses: dict[str, Any] = {
             HOUSE: make_house(),
             "8 а": make_house(["GPV3.1", "GPV4.2"]),
             "10": make_house([]),
@@ -175,6 +175,15 @@ class FakeDtek:
         self.weekly: dict[str, dict[int, str]] = {
             GROUP: {day: slots(possible=(("16:00", "20:00"),)) for day in range(1, 8)},
             "GPV4.2": {day: slots() for day in range(1, 8)},
+        }
+        # The ``show*`` flags of every getHomeNum answer.
+        self.flags: dict[str, Any] = {
+            "showCurOutageParam": True,
+            "showCurSchedule": True,
+            "showTableSchedule": True,
+            "showTablePlan": True,
+            "showTableFact": True,
+            "showUserGroup": True,
         }
         self.mirror_days: dict[date, dict[str, str]] | None = None
         self.mirror_update = "18.10.2026 09:00"
@@ -228,7 +237,7 @@ class FakeDtek:
         answer: dict[str, Any] = {
             "result": True,
             "data": self.houses,
-            "showCurOutageParam": True,
+            **self.flags,
             "updateTimestamp": "10:10 18.10.2026",
         }
         update_fact = form.get("data[2][value]", "")

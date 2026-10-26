@@ -18,10 +18,12 @@ from custom_components.dtek_krem_outages.api import (
     Fact,
     House,
     Preset,
+    Publication,
     async_get_client,
     build_user_agent,
     classify_reason,
     extract_csrf_token,
+    find_house,
     mask_csrf_token,
     parse_day,
 )
@@ -45,6 +47,7 @@ from .conftest import (
     FakeDtek,
     kyiv,
     load_fixture_json,
+    make_house,
     slots,
     unmask,
 )
@@ -106,6 +109,71 @@ def test_parse_real_answer() -> None:
     )
     assert House.from_api("21", raw["data"]["21"], KYIV).outage.kind == (
         OUTAGE_KIND_STABILIZATION
+    )
+    assert not house.external
+
+    # The weekly schedule was hidden on the DTEK page that day.
+    publication = Publication.from_api(raw)
+    assert publication == Publication(
+        schedule=True, daily=True, weekly=False, current_outage=True
+    )
+    assert not publication.daily_hidden
+    assert Publication.from_dict(publication.as_dict()) == publication
+
+
+def test_publication_flags() -> None:
+    """Missing or odd flags are unknown; either table flag hides the day."""
+    assert Publication.from_api({}) == Publication()
+    assert Publication.from_api({"showTableFact": "false"}).daily is None
+    assert Publication(daily=False).daily_hidden
+    assert Publication(schedule=False, daily=True).daily_hidden
+    assert not Publication().daily_hidden
+    assert Publication.from_dict(None) == Publication()
+
+
+def test_house_with_several_records() -> None:
+    """A list of records: groups of all, the most severe outage, the operator."""
+    records = [
+        {
+            "sub_type": "Планові ремонтні роботи",
+            "start_date": "09:00 18.10.2026",
+            "end_date": "18:00 18.10.2026",
+            "type": "1",
+            "sub_type_reason": ["GPV3.1"],
+        },
+        {
+            "sub_type": "Екстренні відключення (Аварійне без графіку)",
+            "start_date": "08:00 18.10.2026",
+            "end_date": "",
+            "type": "2",
+            "sub_type_reason": ["GPV4.2", "GPV3.1"],
+            "cek": True,
+        },
+        "garbage",
+    ]
+    house = House.from_api("5", records, KYIV)
+    assert house.groups == ["GPV3.1", "GPV4.2"]
+    assert house.outage.kind == OUTAGE_KIND_EMERGENCY
+    assert house.outage.start == kyiv(TODAY, "08:00")
+    assert house.external
+    # Between equally severe outages the later start wins.
+    planned = [dict(records[0]), {**records[0], "start_date": "11:00 18.10.2026"}]
+    assert House.from_api("5", planned, KYIV).outage.start == kyiv(TODAY, "11:00")
+    assert House.from_api("5", [], KYIV) is None
+    assert House.from_api("5", "x", KYIV) is None
+
+
+def test_find_house() -> None:
+    """The exact number wins; otherwise case, spaces and Latin letters are ignored."""
+    houses = {number: House(number=number) for number in ("8 а", "8А/1", "10", "1/2")}
+    assert find_house(houses, "10").number == "10"
+    assert find_house(houses, "8а").number == "8 а"
+    assert find_house(houses, "8 a").number == "8 а"  # Latin "a"
+    assert find_house(houses, "8а/1").number == "8А/1"
+    assert find_house(houses, "12") is None
+    # Two houses that differ only in spacing: no guess.
+    assert (
+        find_house({"8а": House(number="8а"), "8 а": House(number="8 а")}, "8А") is None
     )
 
 
@@ -220,9 +288,15 @@ async def test_get_street(client: DtekClient, fake_dtek: FakeDtek) -> None:
         "data[2][value]": FORCE_UPDATE_FACT,
     }
 
+    assert data.publication.daily is True
+
+    fake_dtek.flags["showTablePlan"] = False
+    fake_dtek.houses["7"] = [make_house(), make_house(["GPV4.2"])]
     data = await client.async_get_street(SETTLEMENT, STREET, fake_dtek.update)
     assert data.fact is None
     assert data.preset is None
+    assert data.publication.weekly is False
+    assert data.houses["7"].groups == ["GPV3.1", "GPV4.2"]
     data = await client.async_get_street(SETTLEMENT, STREET)
     assert data.fact is None
     data = await client.async_get_street(SETTLEMENT, STREET, "0")

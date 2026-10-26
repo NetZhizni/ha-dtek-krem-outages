@@ -390,6 +390,16 @@ async def test_ukrainian_names(
     assert calendar.attributes["friendly_name"] == f"{TITLE} Відключення"
     assert calendar.attributes["message"] == "Відключення світла"
     assert calendar.attributes["description"] == "Черга 3.1"
+    # IDs of the newer sensors come from their English names, as in the README.
+    for key, suffix in (
+        ("connection", "_dtek_connection"),
+        ("restoration", "_estimated_restoration"),
+        ("address_status", "_address_status"),
+    ):
+        assert get_entity_id(hass, "sensor", key).endswith(suffix)
+    assert state(hass, "sensor", "connection").attributes["friendly_name"] == (
+        f"{TITLE} Зв'язок з ДТЕК"
+    )
 
 
 @pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en"}])
@@ -463,3 +473,95 @@ async def test_extended_outage_is_not_restarted(
     assert [e.data["type"] for e in events] == ["schedule_changed"]
     outage_end = state(hass, "sensor", "outage_end")
     assert dt_util.parse_datetime(outage_end.state) == kyiv(TODAY, "15:00")
+
+
+async def test_connection_and_freshness(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The connection sensor and ``data_status`` follow what answered."""
+    await setup_entry(hass, mock_config_entry)
+    connection = state(hass, "sensor", "connection")
+    assert connection.state == "ok"
+    assert connection.attributes["device_class"] == "enum"
+    assert connection.attributes["consecutive_failures"] == 0
+    assert connection.attributes["update_interval_minutes"] == 5
+    assert connection.attributes["daily_schedule_shown"] is True
+    assert connection.attributes["weekly_schedule_shown"] is True
+    assert connection.attributes["blocked"] is False
+    for platform, key in (
+        ("sensor", "next_outage"),
+        ("sensor", "outages_today"),
+        ("binary_sensor", "scheduled_outage"),
+        ("calendar", "outages"),
+    ):
+        attributes = state(hass, platform, key).attributes
+        assert attributes["data_status"] == "current", key
+        assert attributes["last_verified_at"] == "2026-10-18T07:10:00+00:00", key
+
+    fake_dtek.ajax_error = TimeoutError()
+    fake_dtek.mirror_error = TimeoutError()
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    connection = state(hass, "sensor", "connection")
+    assert connection.state == "offline"
+    assert connection.attributes["consecutive_failures"] == 1
+    assert connection.attributes["last_error"].startswith("DTEK:")
+    assert state(hass, "sensor", "next_outage").attributes["data_status"] == "stale"
+    assert state(hass, "sensor", "address_status").state == "unavailable"
+
+
+async def test_address_status_sensors(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The status and the estimated restoration of the address."""
+    await setup_entry(hass, mock_config_entry)
+    status = state(hass, "sensor", "address_status")
+    assert status.state == "none"
+    assert status.attributes["options"] == [
+        "none",
+        "stabilization",
+        "emergency",
+        "planned",
+        "other",
+    ]
+    assert state(hass, "sensor", "restoration").state == "unknown"
+
+    fake_dtek.houses[HOUSE] = make_house(
+        reason="Аварійні ремонтні роботи",
+        start="09:50 18.10.2026",
+        end="13:00 18.10.2026",
+    )
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    status = state(hass, "sensor", "address_status")
+    assert status.state == "emergency"
+    assert status.attributes["reason"] == "Аварійні ремонтні роботи"
+    assert status.attributes["active"] is True
+    restoration = state(hass, "sensor", "restoration")
+    assert dt_util.parse_datetime(restoration.state) == kyiv(TODAY, "13:00")
+    assert restoration.attributes["reason"] == "Аварійні ремонтні роботи"
+
+
+async def test_calendar_hides_weekly_with_dtek(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The weekly schedule is left out while the DTEK page hides it."""
+    fake_dtek.flags["showTablePlan"] = False
+    await setup_entry(hass, mock_config_entry)
+    entity_id = get_entity_id(hass, "calendar", "outages")
+    response = await hass.services.async_call(
+        "calendar",
+        "get_events",
+        {
+            ATTR_ENTITY_ID: entity_id,
+            "start_date_time": kyiv(TODAY, "00:00"),
+            "end_date_time": kyiv(TODAY + timedelta(days=7), "00:00"),
+        },
+        blocking=True,
+        return_response=True,
+    )
+    starts = [e["start"] for e in response[entity_id]["events"]]
+    assert starts == ["2026-10-18T12:00:00+03:00", "2026-10-18T18:00:00+03:00"]
+    assert (
+        state(hass, "sensor", "connection").attributes["weekly_schedule_shown"] is False
+    )

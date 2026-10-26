@@ -6,49 +6,52 @@
 [![Validate](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/validate.yml/badge.svg)](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/validate.yml)
 [![Tests](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/tests.yml/badge.svg)](https://github.com/NetZhizni/ha-dtek-krem-outages/actions/workflows/tests.yml)
 
-**English** | [Українська](https://github.com/NetZhizni/ha-dtek-krem-outages/blob/main/doc/README_uk.md)
+**Українська** | [English](https://github.com/NetZhizni/ha-dtek-krem-outages/blob/main/doc/README_en.md)
 
-Home Assistant integration for the power outage schedules of [DTEK Kyiv Regional Electric Networks](https://www.dtek-krem.com.ua/ua/shutdowns) (DTEK KREM, Kyiv region): your group, the schedule for today and tomorrow, outages reported for your address, and events when the schedule changes or an outage is about to start.
+Інтеграція Home Assistant для графіків відключень [ДТЕК Київські регіональні електромережі](https://www.dtek-krem.com.ua/ua/shutdowns) (ДТЕК КРЕМ, Київська область). Вона показує вашу чергу, графік на сьогодні й завтра, відключення, які ДТЕК вказує для вашої адреси, і надсилає події, коли графік змінюється або відключення ось-ось почнеться.
 
-> Data provided by [DTEK KREM](https://www.dtek-krem.com.ua/ua/shutdowns). This project is not affiliated with DTEK.
+> Data provided by [DTEK KREM](https://www.dtek-krem.com.ua/ua/shutdowns). Проєкт не пов'язаний з ДТЕК.
 
-## What it is
+## Що це
 
-You pick your settlement, street and house the same way as on the DTEK website. The integration finds your group ("черга"), polls DTEK every few minutes and creates a device with sensors, a calendar and an event entity. It is configured entirely in the UI.
+Ви обираєте населений пункт, вулицю й будинок так само, як на сайті ДТЕК. Інтеграція визначає вашу чергу, раз на кілька хвилин опитує ДТЕК і створює пристрій із сенсорами, календарем і event-сутністю. Налаштовується тільки через UI.
 
-The schedule changes often, sometimes several times a day. So the integration:
+Графік змінюють часто, іноді кілька разів на день. Тому інтеграція:
 
-- **keeps the current state** in Home Assistant storage: the schedule by day, its DTEK version, the weekly schedule of possible outages and the outage reported for the address. A restart, or both data sources being down (common during blackouts), doesn't lose the schedule; entities keep working on what is stored;
-- **applies a new version only to the future**: half-hours that already passed keep what was in effect, the current and later half-hours take the new values. Days DTEK doesn't list (tomorrow before it is published) are kept;
-- **announces changes**: `schedule_published` (a new day appeared, usually tomorrow) and `schedule_changed` (the rest of a day changed), with the new and the previous outages;
-- **warns before outages**: `outage_warning` before a scheduled outage starts and `outage_end_warning` before it ends (power returns), each at the times you tick (e.g. 30 and 5 minutes); `outage_started` and `outage_ended` at the exact times, without waiting for the next poll.
+- **зберігає поточний стан** у сховищі Home Assistant: графік по днях, його версію від ДТЕК, тижневий графік можливих відключень і відключення за адресою. Перезапуск або недоступність обох джерел (звична річ під час блекаутів) не губить графік: сутності працюють на збереженому, а атрибут `data_status` показує, що дані не підтверджені останнім оновленням;
+- **застосовує нову версію лише до майбутнього**: півгодини, що вже минули, лишаються такими, як діяли; поточні й наступні беруть нові значення. Дні, яких ДТЕК не показує (завтра до публікації), зберігаються;
+- **показує те, що показує сайт ДТЕК**: коли сторінка ховає графік на день або тижневий графік можливих відключень, сутності й календар їх теж не показують;
+- **повідомляє про зміни**: `schedule_published` (з'явився графік на новий день, зазвичай на завтра) і `schedule_changed` (змінився залишок дня), з новими й попередніми відключеннями;
+- **попереджає про відключення**: `outage_warning` перед початком відключення за графіком і `outage_end_warning` перед його кінцем (поверненням світла), у позначені вами моменти (наприклад, за 30 і за 5 хвилин). `outage_started` і `outage_ended` приходять точно в момент, не чекаючи наступного опитування.
 
-## How it gets the data
+## Звідки дані
 
-| Source | What | When |
+| Джерело | Що | Коли |
 |---|---|---|
-| [dtek-krem.com.ua](https://www.dtek-krem.com.ua/ua/shutdowns) | Houses of your street with their group and current outage, the actual schedule (`fact`) and the weekly schedule (`preset`) | Every update |
-| [Baskerville42/outage-data-ua](https://github.com/Baskerville42/outage-data-ua) (public mirror of the same `fact`/`preset`, updated about every 5 min) | Schedule only, no address data | Only when DTEK fails, and only if its version is newer |
+| [dtek-krem.com.ua](https://www.dtek-krem.com.ua/ua/shutdowns) | Будинки вашої вулиці з чергою й поточним відключенням, фактичний графік (`fact`), тижневий (`preset`) і прапорці, що з цього показує сторінка | Кожне оновлення |
+| [Baskerville42/outage-data-ua](https://github.com/Baskerville42/outage-data-ua) (публічне дзеркало тих самих `fact`/`preset`, оновлюється приблизно раз на 5 хв) | Лише графік, без даних адреси | Тільки коли ДТЕК недоступний, і тільки якщо версія новіша; для запису без адреси — завжди |
 
-The DTEK pages are behind an anti-bot JavaScript challenge, but the endpoint the shutdowns page loads its data from (`POST /ua/ajax`) is not. The integration uses that endpoint like the page does, including the site's CSRF token, with one request per entry per update and an honest User-Agent. It sends the version it already has, and DTEK includes the schedule only when there is a newer one, so most answers are a few kilobytes.
+Сторінки ДТЕК закриті JavaScript-перевіркою від ботів, але ендпоінт, з якого сторінка відключень бере дані (`POST /ua/ajax`), — ні. Інтеграція звертається до нього так само, як сторінка: з CSRF-токеном сайту, одним запитом на запис за оновлення й чесним User-Agent. Вона надсилає версію, яку вже має, і ДТЕК додає графік лише тоді, коли є новіший, тож більшість відповідей важать кілька кілобайт. Перевірку від ботів інтеграція не обходить і браузер не імітує.
 
-## Installation
+Після невдалого запиту інтервал оновлення подвоюється (5 → 10 → 15 хв за замовчуванням, з невеликим випадковим розкидом), а після першої успішної відповіді повертається до звичайного. Так інтеграція не засипає ДТЕК запитами, поки сайт не відповідає.
 
-> Home Assistant version requirement:
+## Встановлення
+
+> Вимоги до версії Home Assistant:
 >
 > - Core $\geq$ 2025.8
 
-### Method 1: [HACS](https://hacs.xyz/) (recommended)
+### Спосіб 1: [HACS](https://hacs.xyz/) (рекомендовано)
 
-[![Open your Home Assistant instance and open the DTEK KREM Outages repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=NetZhizni&repository=ha-dtek-krem-outages&category=integration)
+[![Відкрити репозиторій DTEK KREM Outages у HACS вашого Home Assistant.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=NetZhizni&repository=ha-dtek-krem-outages&category=integration)
 
-Or add the repository by hand:
+Або додайте репозиторій вручну:
 
-1. HACS → ⋮ → **Custom repositories** → add `https://github.com/NetZhizni/ha-dtek-krem-outages` with type **Integration**.
-2. In the HACS search box, type **DTEK KREM Outages** → open it → **Download**.
-3. Restart Home Assistant.
+1. HACS → ⋮ → **Custom repositories** → додайте `https://github.com/NetZhizni/ha-dtek-krem-outages` з типом **Integration**.
+2. У пошуку HACS введіть **DTEK KREM Outages** → відкрийте → **Download**.
+3. Перезапустіть Home Assistant.
 
-### Method 2: Git clone from GitHub
+### Спосіб 2: Git clone з GitHub
 
 ```bash
 cd /config
@@ -57,97 +60,117 @@ mkdir -p custom_components
 cp -r ha-dtek-krem-outages/custom_components/dtek_krem_outages custom_components/
 ```
 
-Restart Home Assistant afterwards. To switch to a release later, `git fetch --tags && git checkout <version>` in the clone and copy the folder again.
+Після цього перезапустіть Home Assistant. Щоб пізніше перейти на реліз, виконайте в клоні `git fetch --tags && git checkout <версія>` і скопіюйте теку ще раз.
 
-### Method 3: Manual installation via [Samba](https://github.com/home-assistant/addons/tree/master/samba) / [FTPS](https://github.com/hassio-addons/addon-ftp)
+### Спосіб 3: Вручну через [Samba](https://github.com/home-assistant/addons/tree/master/samba) / [FTPS](https://github.com/hassio-addons/addon-ftp)
 
-1. Download the latest release from [Releases](https://github.com/NetZhizni/ha-dtek-krem-outages/releases).
-2. Copy `custom_components/dtek_krem_outages` into `config/custom_components`.
-3. Restart Home Assistant.
+1. Завантажте останній реліз з [Releases](https://github.com/NetZhizni/ha-dtek-krem-outages/releases).
+2. Скопіюйте `custom_components/dtek_krem_outages` у `config/custom_components`.
+3. Перезапустіть Home Assistant.
 
-## Configuration
+## Налаштування
 
-[![Open your Home Assistant instance and start setting up a new DTEK KREM Outages integration instance.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=dtek_krem_outages)
+[![Відкрити Home Assistant і почати налаштування DTEK KREM Outages.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=dtek_krem_outages)
 
-**Settings → Devices & services → Add integration → DTEK KREM Outages**, then:
+**Налаштування → Пристрої та служби → Додати інтеграцію → DTEK KREM Outages**, далі:
 
-1. **Settlement**: start typing, e.g. `Бориспіль`. The list is the one DTEK uses (about 1200 settlements).
-2. **Street**: villages without street names have `Без вулиці`. DTEK lists some places under several spellings (`с. Софіївська Борщагівка` and `Софіївська Борщагівка`); the streets of all of them are shown, the ones of another spelling with it in brackets, so the settlement you picked does not matter.
-3. **House**: as DTEK lists it (`43`, `8 а`, `1/2`, ...). Optionally give the entry a short **Name**, e.g. `Home`: entity IDs are built from it (`sensor.home_next_outage`). The examples below assume that name. **Language of entity names**: Ukrainian (default), English or Russian, see the options below.
-4. **Group**: asked only when DTEK lists no group or several groups for the house. Otherwise the group is detected, and if DTEK later moves the house to another group the entry follows it (`group_changed` event). A group you chose yourself is never replaced.
+1. **Населений пункт**: почніть вводити, наприклад `Бориспіль`. Список той самий, що в ДТЕК (близько 1200 населених пунктів).
+2. **Вулиця**: для сіл без назв вулиць є `Без вулиці`. Деякі населені пункти ДТЕК записав у кількох написаннях (`с. Софіївська Борщагівка` і `Софіївська Борщагівка`). Показуються вулиці всіх написань, вулиці іншого написання — з ним у дужках, тож неважливо, яке ви обрали.
+3. **Будинок**: як у списку ДТЕК (`43`, `8 а`, `1/2`, ...). За бажанням дайте запису коротку **Назву**, наприклад `Home`: з неї будуються ID сутностей (`sensor.home_next_outage`). Приклади нижче використовують саме таку назву. **Мова назв сутностей**: українська (за замовчуванням), англійська або російська, див. параметри нижче.
+4. **Черга**: питається лише тоді, коли ДТЕК не вказує для будинку жодної черги або вказує кілька. Інакше черга визначається сама, а якщо ДТЕК згодом переведе будинок в іншу чергу, запис піде за нею (подія `group_changed`). Чергу, обрану вами вручну, інтеграція не змінює.
 
-Each address can be added once; add several entries for several addresses. **⋮ → Reconfigure** changes the address or group.
+Кожну адресу можна додати один раз; для кількох адрес додайте кілька записів. **⋮ → Переналаштувати** змінює адресу або чергу.
 
-### Options
+### Якщо ДТЕК недоступний
 
-| Option | Default | Description |
+Коли під час додавання не вдається отримати від ДТЕК список населених пунктів, інтеграція пропонує два варіанти:
+
+- **Спробувати ще раз**;
+- **Відстежувати чергу без адреси**: ви обираєте чергу (її показує сайт ДТЕК після введення адреси), а графік береться з дзеркала. Даних адреси (визначення й зміни черги, відключень за адресою) тоді немає, тож адресні сутності не створюються. Запис отримує назву на кшталт `Черга 3.1`. Коли ДТЕК знову доступний, адресу можна додати через **⋮ → Переналаштувати**.
+
+### Параметри
+
+| Параметр | За замовчуванням | Опис |
 |---|---|---|
-| Update interval | 5 min | Minutes between requests to DTEK, at least 2 |
-| Warn before an outage starts | 30 min | Checkboxes (1, 5, 10, 15, 30, 60, 120 min): when `outage_warning` fires, one event per ticked time; nothing ticked turns it off |
-| Warn before an outage ends (power returns) | none | The same for `outage_end_warning` |
-| Use the backup source | on | Take the schedule from the mirror when DTEK can't be reached |
-| Show possible outages in the calendar | on | Fill the next 7 days without an actual schedule with the weekly schedule of possible outages |
-| Language of entity names | Українська | Language of the entity names and calendar events (Ukrainian, English or Russian), whatever the language of Home Assistant. Entity IDs stay in English |
+| Інтервал оновлення | 5 хв | Хвилин між запитами до ДТЕК, щонайменше 2. Після збоїв тимчасово збільшується до 15 хв (або до вашого інтервалу, якщо він довший) |
+| Попереджати перед початком відключення | 30 хв | Чекбокси (1, 5, 10, 15, 30, 60, 120 хв): коли надсилати `outage_warning`, по одній події на кожен позначений час; нічого не позначено — вимкнено |
+| Попереджати перед закінченням відключення (поверненням світла) | немає | Те саме для `outage_end_warning` |
+| Використовувати запасне джерело | увімк. | Брати графік з дзеркала, коли ДТЕК недоступний. Для запису без адреси цього параметра немає: дзеркало там єдине джерело |
+| Показувати можливі відключення в календарі | увімк. | Заповнювати наступні 7 днів без фактичного графіка тижневим графіком можливих відключень, поки ДТЕК показує його на своєму сайті |
+| Мова назв сутностей | Українська | Мова назв сутностей і подій календаря (українська, англійська чи російська) незалежно від мови Home Assistant. ID сутностей лишаються англійськими |
 
-The entry reloads by itself after saving.
+Після збереження запис перезавантажується сам.
 
-## Entities
+## Сутності
 
-Each entry creates one device:
+Кожен запис створює один пристрій:
 
-| Entity | State |
+| Сутність | Стан |
 |---|---|
-| `sensor.…_group` | Group, e.g. `3.1`. Attributes: `group_id` (`GPV3.1`), `groups_at_address`, `manual`, the address |
-| `sensor.…_next_outage` | Start of the next scheduled outage (timestamp). Attributes: `end`, `duration_minutes` |
-| `sensor.…_outage_end` | End of the outage in progress; `unknown` when there is none |
-| `sensor.…_outages_today` | Scheduled outage time today, hours. Attributes: `outages_text` (`12:00–14:00, 18:00–20:30`), `outages`, `possible_text`, `schedule`, `published` |
-| `sensor.…_outages_tomorrow` | The same for tomorrow; `unknown` until DTEK publishes it |
-| `sensor.…_schedule_updated` | When DTEK last changed the schedule. Attributes: `version`, `source` (`dtek` / `mirror` / `storage`) |
-| `sensor.…_last_update` | Last time a source answered (diagnostic). Attribute: `last_error` |
-| `binary_sensor.…_scheduled_outage` | `on` (shown as *Problem*) during a scheduled outage. Attributes: `start`, `end`, `next_start`, `next_end` |
-| `binary_sensor.…_address_outage` | `on` (shown as *Problem*) while DTEK reports an outage for the house: stabilization, emergency or planned works, with its own start and end. Attributes: `reason`, `kind`, `start`, `end`. `unavailable` when DTEK itself can't be reached |
-| `calendar.…_outages` | Scheduled outages, possible outages and non-stabilization works reported for the address |
-| `event.…_outage_events` | Every event below (`event_type` is the event type, attributes are its data) |
+| `sensor.…_group` | Черга, наприклад `3.1`. Атрибути: `group_id` (`GPV3.1`), `groups_at_address`, `manual`, адреса, `external_operator` |
+| `sensor.…_next_outage` | Початок наступного відключення за графіком (мітка часу). Атрибути: `end`, `duration_minutes` |
+| `sensor.…_outage_end` | Кінець поточного відключення; `unknown`, якщо його немає |
+| `sensor.…_outages_today` | Тривалість відключень за графіком сьогодні, години. Атрибути: `outages_text` (`12:00–14:00, 18:00–20:30`), `outages`, `possible_text`, `schedule`, `published` |
+| `sensor.…_outages_tomorrow` | Те саме на завтра; `unknown`, поки ДТЕК не опублікує |
+| `sensor.…_schedule_updated` | Коли ДТЕК востаннє змінив графік. Атрибути: `version`, `source` (`dtek` / `mirror` / `storage`) |
+| `sensor.…_address_status` | Що ДТЕК вказує для будинку: `none` (без відключень), `stabilization`, `emergency`, `planned` або `other`. Атрибути: `reason`, `start`, `end`, `active` (зараз між початком і кінцем), `external_operator`. `unavailable`, коли недоступний сам ДТЕК |
+| `sensor.…_estimated_restoration` | Орієнтовне відновлення світла за адресою (мітка часу), як його вказує ДТЕК; `unknown` без відключення. Атрибут: `reason` |
+| `sensor.…_last_update` | Коли востаннє відповіло хоч одне джерело (діагностична). Атрибут: `last_error` |
+| `sensor.…_dtek_connection` | Що відповіло на останнє оновлення (діагностична): `ok` (ДТЕК), `mirror` (лише дзеркало) або `offline` (нічого, працює збережене). Атрибути: `last_success`, `last_dtek_success`, `consecutive_failures`, `update_interval_minutes`, `blocked` (ДТЕК віддав перевірку від ботів), `last_error`, `daily_schedule_shown`, `weekly_schedule_shown` |
+| `binary_sensor.…_scheduled_outage` | `on` (показується як *Проблема*) під час відключення за графіком. Атрибути: `start`, `end`, `next_start`, `next_end` |
+| `binary_sensor.…_address_outage` | `on` (показується як *Проблема*), поки триває відключення, яке ДТЕК вказує для будинку: стабілізаційне, аварійне чи планові роботи, зі своїми початком і кінцем. Атрибути: `reason`, `kind`, `start`, `end`. `unavailable`, коли недоступний сам ДТЕК |
+| `calendar.…_outages` | Відключення за графіком, можливі відключення й нестабілізаційні роботи за адресою |
+| `event.…_outage_events` | Усі події нижче (`event_type` — тип події, атрибути — її дані) |
 
-All times are Kyiv time. Sensors switch at the exact moment an outage starts or ends and at midnight, not only on updates.
+У записі без адреси немає `address_status`, `estimated_restoration` і `address_outage`.
 
-## Events
+Сутності, обчислені з графіка (`next_outage`, `outage_end`, `outages_today`, `outages_tomorrow`, `scheduled_outage`, календар), мають ще два атрибути:
 
-Every event is fired on the bus as `dtek_krem_outages_event` with `type`, and on the event entity with the same data.
+- `data_status`: `current`, якщо останнє оновлення отримало графік від ДТЕК чи дзеркала, і `stale`, якщо не відповіло жодне джерело й сутності працюють на збереженому;
+- `last_verified_at`: коли графік востаннє підтвердило хоч одне джерело.
 
-Every event has `type`, `group` (`GPV3.1`), `group_name` (`3.1`), `settlement`, `street`, `house`, `config_entry_id`, `entry_title`, plus:
+Увесь час — київський. Сенсори перемикаються точно в момент початку й кінця відключення та опівночі, а не лише при оновленнях.
 
-| `type` | When | Fields |
+Коли ДТЕК вказує для будинку кілька відключень одразу, показується найсерйозніше (аварійне, потім стабілізаційне, потім планові роботи). Якщо ДТЕК позначає будинок як такий, що його обслуговує інший оператор, `external_operator` дорівнює `true`, а в журналі з'являється попередження: графік ДТЕК до такого будинку може не застосовуватися.
+
+## Події
+
+Кожна подія надсилається на шину як `dtek_krem_outages_event` з полем `type` і в event-сутність з тими самими даними.
+
+У кожній події є `type`, `group` (`GPV3.1`), `group_name` (`3.1`), `settlement`, `street`, `house` (у записі без адреси — `null`), `config_entry_id`, `entry_title`, а також:
+
+| `type` | Коли | Поля |
 |---|---|---|
-| `schedule_published` | A day got its schedule for the first time (usually tomorrow, in the evening) | `date`, `day` (`today` / `tomorrow` / `other`), `outages` (`[{start, end}]`), `outages_text`, `outage_minutes`, `possible`, `schedule`, `schedule_updated`, `source` |
-| `schedule_changed` | The schedule of a day changed from now on | the same, plus `previous_outages`, `previous_outages_text`, `previous_outage_minutes` |
-| `outage_warning` | N minutes before a scheduled outage starts, once for each ticked time, or at once (a single event) if a new outage starts sooner | `start`, `end`, `duration_minutes`, `minutes` (left) |
-| `outage_end_warning` | N minutes before a scheduled outage ends and the power returns, once for each ticked time (not for a time longer than the outage) | `start`, `end`, `duration_minutes`, `minutes` (left) |
-| `outage_started` | A scheduled outage starts | `start`, `end`, `duration_minutes` |
-| `outage_ended` | A scheduled outage ends | `start`, `end`, `duration_minutes`, `next_start`, `next_end` |
-| `address_outage` | DTEK reports an outage for the house, changes its end, or clears it | `status` (`new` / `updated` / `cleared`), `reason`, `kind` (`stabilization` / `emergency` / `planned` / `other`), `start`, `end`, `previous_end` |
-| `group_changed` | DTEK moved the house to another group | `previous_group`, `previous_group_name` |
+| `schedule_published` | День уперше отримав графік (зазвичай завтрашній, увечері) | `date`, `day` (`today` / `tomorrow` / `other`), `outages` (`[{start, end}]`), `outages_text`, `outage_minutes`, `possible`, `schedule`, `schedule_updated`, `source` |
+| `schedule_changed` | Графік дня змінився від поточного моменту | те саме, плюс `previous_outages`, `previous_outages_text`, `previous_outage_minutes` |
+| `outage_warning` | За N хвилин до початку відключення за графіком, по разу на кожен позначений час, або одразу (однією подією), якщо нове відключення почнеться раніше | `start`, `end`, `duration_minutes`, `minutes` (залишилось) |
+| `outage_end_warning` | За N хвилин до закінчення відключення за графіком, коли повернеться світло, по разу на кожен позначений час (не для часу, довшого за саме відключення) | `start`, `end`, `duration_minutes`, `minutes` (залишилось) |
+| `outage_started` | Почалося відключення за графіком | `start`, `end`, `duration_minutes` |
+| `outage_ended` | Закінчилося відключення за графіком | `start`, `end`, `duration_minutes`, `next_start`, `next_end` |
+| `address_outage` | ДТЕК вказав відключення для будинку, змінив його кінець або зняв його | `status` (`new` / `updated` / `cleared`), `reason`, `kind` (`stabilization` / `emergency` / `planned` / `other`), `start`, `end`, `previous_end` |
+| `group_changed` | ДТЕК перевів будинок в іншу чергу | `previous_group`, `previous_group_name` |
 
-Rules:
+Правила:
 
-- **First run**: the current state is recorded silently, no schedule events.
-- **Changes in the past only** (DTEK rewrites a finished half-hour) fire nothing.
-- **After a restart**, changes published while Home Assistant was down are announced. Events wait until Home Assistant has started, so automations receive them.
-- `outage_started` / `outage_ended` are not fired for an edge that passed while Home Assistant was down. A warning is not repeated after a restart. When the integration wakes up late, inside several ticked times at once, it sends one event, not one per time.
+- **Перший запуск**: поточний стан записується мовчки, без подій про графік.
+- **Зміни лише в минулому** (ДТЕК переписав півгодини, що вже минули) не породжують подій.
+- **ДТЕК приховав графік на день** (сторінка перестала показувати таблицю): залишок дня й наступні дні очищаються, приходить `schedule_changed` без відключень. Коли таблиця з'являється знову, інтеграція одразу запитує повний графік, і приходить ще один `schedule_changed`.
+- **Після перезапуску** зміни, опубліковані, поки Home Assistant не працював, приходять як події. Події чекають повного запуску Home Assistant, щоб їх отримали автоматизації.
+- `outage_started` / `outage_ended` не надсилаються для моментів, що минули, поки Home Assistant не працював. Попередження після перезапуску не повторюється. Якщо інтеграція прокинулась із запізненням і всередині кількох позначених часів одразу, вона надсилає одну подію, а не по одній на кожен час.
 
-## Services
+## Сервіси
 
-| Service | Description |
+| Сервіс | Опис |
 |---|---|
-| `dtek_krem_outages.refresh` | Update now. `config_entry_id` is optional; fails when no source answered |
-| `dtek_krem_outages.get_schedule` | Returns `{entries: [{group, days: {date: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, address_outage, source, ...}]}` |
+| `dtek_krem_outages.refresh` | Оновити зараз. `config_entry_id` необов'язковий; помилка, якщо не відповіло жодне джерело |
+| `dtek_krem_outages.get_schedule` | Повертає `{entries: [{group, days: {дата: {outages, outages_text, outage_minutes, possible, schedule}}, weekly, address_outage, source, connection, data_status, publication, ...}]}` |
 
-## Examples
+## Приклади
 
-### New or changed schedule → Telegram
+### Новий або змінений графік → Telegram
 
 ```yaml
-alias: "Outage schedule → Telegram"
+alias: "Графік відключень → Telegram"
 triggers:
   - trigger: event
     event_type: dtek_krem_outages_event
@@ -161,43 +184,49 @@ actions:
   - action: telegram_bot.send_message
     data:
       message: >-
-        {{ '🆕 Schedule for' if trigger.event.data.type == 'schedule_published'
-           else '✏️ Changed schedule for' }}
-        {{ trigger.event.data.day if trigger.event.data.day != 'other'
-           else trigger.event.data.date }}
-        (group {{ trigger.event.data.group_name }}):
-        {{ trigger.event.data.outages_text or 'no outages' }}
+        {{ '🆕 Графік на' if trigger.event.data.type == 'schedule_published'
+           else '✏️ Змінено графік на' }}
+        {{ {'today': 'сьогодні', 'tomorrow': 'завтра'}.get(trigger.event.data.day,
+           trigger.event.data.date) }}
+        (черга {{ trigger.event.data.group_name }}):
+        {{ trigger.event.data.outages_text or 'без відключень' }}
         {%- if trigger.event.data.previous_outages_text is defined %}
-        (was: {{ trigger.event.data.previous_outages_text or 'no outages' }})
+        (було: {{ trigger.event.data.previous_outages_text or 'без відключень' }})
         {%- endif %}
 mode: queued
 ```
 
-### Warning on the phone
+### Попередження на телефон
 
-Tick the times in the options (e.g. 30 and 5 minutes before the start); `minutes` tells which one fired. Use `type: outage_end_warning` the same way for the power coming back.
+Позначте часи в параметрах (наприклад, за 30 і за 5 хвилин до початку); `minutes` показує, який із них спрацював. Так само працює `type: outage_end_warning` для повернення світла.
 
 ```yaml
-alias: "Outage soon → phone"
+alias: "Скоро відключення → телефон"
 triggers:
   - trigger: event
     event_type: dtek_krem_outages_event
     event_data:
       type: outage_warning
+conditions:
+  # Не попереджати за графіком, який не підтвердило жодне джерело.
+  - condition: state
+    entity_id: binary_sensor.home_scheduled_outage
+    attribute: data_status
+    state: current
 actions:
   - action: notify.mobile_app_my_phone
     data:
-      title: "⚡ Outage in {{ trigger.event.data.minutes }} min"
+      title: "⚡ Відключення через {{ trigger.event.data.minutes }} хв"
       message: >-
         {{ as_timestamp(trigger.event.data.start) | timestamp_custom('%H:%M') }}–{{
            as_timestamp(trigger.event.data.end) | timestamp_custom('%H:%M') }}
 mode: queued
 ```
 
-### Emergency works at the address
+### Аварійні роботи за адресою
 
 ```yaml
-alias: "Emergency outage at home"
+alias: "Аварійне відключення вдома"
 triggers:
   - trigger: event
     event_type: dtek_krem_outages_event
@@ -211,12 +240,12 @@ actions:
     data:
       title: "🚧 {{ trigger.event.data.reason }}"
       message: >-
-        Until {{ as_timestamp(trigger.event.data.end) | timestamp_custom('%d.%m %H:%M')
-                 if trigger.event.data.end else 'unknown' }}
+        До {{ as_timestamp(trigger.event.data.end) | timestamp_custom('%d.%m %H:%M')
+              if trigger.event.data.end else 'невідомо' }}
 mode: queued
 ```
 
-Instead of the bus event you can trigger on the event entity; the data is then in `trigger.to_state.attributes`:
+Замість події на шині можна використати event-сутність; дані тоді в `trigger.to_state.attributes`:
 
 ```yaml
 triggers:
@@ -226,53 +255,163 @@ triggers:
     to: outage_warning
 ```
 
-### Lovelace card
+### Нагадування про планові роботи за календарем
+
+Календарний тригер спрацьовує із зсувом від початку події. Роботи за адресою — єдині події календаря з місцем (`location`):
+
+```yaml
+alias: "Планові роботи завтра → телефон"
+triggers:
+  - trigger: calendar
+    event: start
+    entity_id: calendar.home_outages
+    offset: "-12:00:00"
+conditions:
+  - "{{ trigger.calendar_event.location | default('', true) != '' }}"
+actions:
+  - action: notify.mobile_app_my_phone
+    data:
+      title: "🛠 {{ trigger.calendar_event.summary }}"
+      message: >-
+        {{ as_timestamp(trigger.calendar_event.start) | timestamp_custom('%d.%m %H:%M') }}–{{
+           as_timestamp(trigger.calendar_event.end) | timestamp_custom('%H:%M') }}
+mode: queued
+```
+
+### ДТЕК не відповідає годину
+
+```yaml
+alias: "Немає зв'язку з ДТЕК"
+triggers:
+  - trigger: state
+    entity_id: sensor.home_dtek_connection
+    to: offline
+    for: "01:00:00"
+actions:
+  - action: notify.mobile_app_my_phone
+    data:
+      title: "📡 Немає зв'язку з ДТЕК"
+      message: >-
+        Графік з {{ as_timestamp(state_attr('sensor.home_dtek_connection', 'last_success'))
+                    | timestamp_custom('%d.%m %H:%M') }} може бути застарілим.
+```
+
+### Картка Lovelace
 
 ```yaml
 type: markdown
 content: |
-  **Group {{ states('sensor.home_group') }}**
+  **Черга {{ states('sensor.home_group') }}**
 
-  Today: {{ state_attr('sensor.home_outages_today', 'outages_text') or 'no outages' }}
+  Сьогодні: {{ state_attr('sensor.home_outages_today', 'outages_text') or 'без відключень' }}
 
-  Tomorrow: {% if state_attr('sensor.home_outages_tomorrow', 'published') -%}
-  {{ state_attr('sensor.home_outages_tomorrow', 'outages_text') or 'no outages' }}
-  {%- else %}not published yet{% endif %}
+  Завтра: {% if state_attr('sensor.home_outages_tomorrow', 'published') -%}
+  {{ state_attr('sensor.home_outages_tomorrow', 'outages_text') or 'без відключень' }}
+  {%- else %}ще не опубліковано{% endif %}
 
   {% if is_state('binary_sensor.home_scheduled_outage', 'on') -%}
-  ⚫ Power back at {{ as_timestamp(states('sensor.home_outage_end')) | timestamp_custom('%H:%M') }}
+  ⚫ Світло з'явиться о {{ as_timestamp(states('sensor.home_outage_end')) | timestamp_custom('%H:%M') }}
   {%- elif states('sensor.home_next_outage') not in ['unknown', 'unavailable'] -%}
-  🟢 Next outage {{ as_timestamp(states('sensor.home_next_outage')) | timestamp_custom('%d.%m %H:%M') }}
+  🟢 Наступне відключення {{ as_timestamp(states('sensor.home_next_outage')) | timestamp_custom('%d.%m %H:%M') }}
   {%- endif %}
 
-  <sub>Data: DTEK KREM, updated {{ as_timestamp(states('sensor.home_schedule_updated')) | timestamp_custom('%d.%m %H:%M') }}</sub>
+  {% if state_attr('sensor.home_next_outage', 'data_status') == 'stale' -%}
+  ⚠️ Немає зв'язку з ДТЕК, показано збережений графік
+  {%- endif %}
+
+  <sub>Дані: ДТЕК КРЕМ, оновлено {{ as_timestamp(states('sensor.home_schedule_updated')) | timestamp_custom('%d.%m %H:%M') }}</sub>
 ```
 
-For a week view, use the standard **Calendar** card with `calendar.home_outages`.
+Для перегляду тижня використайте стандартну картку **Календар** з `calendar.home_outages`.
 
-## Diagnostics
+## Якщо щось не так
 
-**Devices & services → DTEK KREM Outages → ⋮ → Download diagnostics**. The street and house number are redacted; the settlement, group and schedule stay.
+| Що бачите | Що робити |
+|---|---|
+| Інтеграції немає в списку | Перезапустіть Home Assistant. Перевірте, що `manifest.json` лежить саме в `config/custom_components/dtek_krem_outages/` |
+| Немає вашого населеного пункту, вулиці чи будинку | Перевірте адресу на [dtek-krem.com.ua](https://www.dtek-krem.com.ua/ua/shutdowns): список той самий. Київ обслуговує інший оператор (ДТЕК КЕМ / Yasno) |
+| Під час додавання «ДТЕК недоступний» | Спробуйте пізніше або додайте запис лише за чергою й допишіть адресу пізніше через **Переналаштувати** |
+| `sensor.…_dtek_connection` показує `mirror` чи `offline` | ДТЕК зараз не відповідає; `blocked: true` означає, що він віддав перевірку від ботів. Інтеграція повторює спроби сама, з інтервалом до 15 хв. Не видаляйте й не додавайте запис заново: збережений графік і так працює |
+| У календарі немає можливих відключень | ДТЕК зараз не показує тижневий графік (`weekly_schedule_shown: false` у `sensor.…_dtek_connection`) або вимкнено параметр «Показувати можливі відключення» |
+| Графік раптом став «без відключень» | Якщо `daily_schedule_shown: false`, ДТЕК приховав графік на сайті; інтеграція покаже його знову, щойно він з'явиться |
+| `external_operator: true` | ДТЕК вважає, що будинок обслуговує інший оператор, і його графік може не діяти для цієї адреси |
 
-## Known limitations
+## Діагностика
 
-- The integration depends on the DTEK website. If DTEK changes the endpoint or puts it behind the anti-bot challenge too, the schedule still comes from the mirror, but the address data (group detection, `address_outage`) stops until the integration is updated.
-- The mirror updates about every 5 minutes and can lag behind DTEK.
-- The schedule has half-hour precision, like on the DTEK website. On DST change days the missing or repeated hour follows the wall clock.
-- Only DTEK KREM (Kyiv region). Kyiv city is served by DTEK KEM / Yasno, which this integration does not cover.
+**Пристрої та служби → DTEK KREM Outages → ⋮ → Завантажити діагностику**. Вулиця й номер будинку приховані; населений пункт, черга й графік лишаються.
 
-## Attribution
+## Відомі обмеження
 
-Outage data is provided by DTEK Kyiv Regional Electric Networks; every entity carries the attribution `Data provided by DTEK Kyiv Regional Electric Networks`. The backup copy comes from [Baskerville42/outage-data-ua](https://github.com/Baskerville42/outage-data-ua).
+- Інтеграція залежить від сайту ДТЕК. Якщо ДТЕК змінить ендпоінт або теж закриє його перевіркою від ботів, графік і далі прийде з дзеркала, але дані адреси (визначення черги, `address_outage`) зупиняться до оновлення інтеграції.
+- Дзеркало оновлюється приблизно раз на 5 хвилин і може відставати від ДТЕК.
+- Графік має точність до пів години, як на сайті ДТЕК. У дні переходу на літній/зимовий час пропущена чи повторена година йде за настінним годинником.
+- Одна черга на запис. Якщо будинок має кілька черг (різні під'їзди на різних лініях), оберіть свою; для кількох черг додайте кілька записів.
+- Лише ДТЕК КРЕМ (Київська область). Київ обслуговує ДТЕК КЕМ / Yasno, цю інтеграцію він не охоплює.
 
-## Releases
+## Порівняння з іншими інтеграціями
 
-The `Tag & Release` workflow runs on every push to `main` and reads `version` from `custom_components/dtek_krem_outages/manifest.json`, the only place the version is kept. It first runs the tests, hassfest and HACS validation; if they pass and the tag or GitHub release for that version doesn't exist yet, it creates whichever is missing, and HACS offers that release as an update. The release notes are the version's section in `CHANGELOG.md`. To publish a release:
+Для ДТЕК КРЕМ є ще дві інтеграції Home Assistant. Порівняння зроблено за їхнім кодом станом на 18.10.2026: [groove-max/ha-dtek-monitor](https://github.com/groove-max/ha-dtek-monitor) версії 1.7.0 і [aavdberg/ha-dtek](https://github.com/aavdberg/ha-dtek) версії 0.1.3. Обидва проєкти розвиваються, тож перевіряйте актуальний стан у їхніх репозиторіях.
 
-1. Bump `version` in `manifest.json`.
-2. Add a `## [X.Y.Z] - YYYY-MM-DD` section to `CHANGELOG.md` (a test checks it exists).
-3. Push to `main`.
+| | **DTEK KREM Outages** (цей) | **DTEK Monitor** (groove-max) | **DTEK Outages** (aavdberg) |
+|---|---|---|---|
+| Оператори | ДТЕК КРЕМ | ДТЕК ОЕМ, КРЕМ, ДнЕМ, КЕМ | ДТЕК ДнЕМ, КЕМ, КРЕМ, ОЕМ |
+| Як отримує дані | `POST /ua/ajax` з CSRF-токеном із кукі, чесний User-Agent | Завантажує сторінку `/ua/shutdowns` через `curl_cffi`, що імітує браузер Chrome (TLS-відбиток, заголовки), далі `/ua/ajax` | Завантажує сторінку `/ua/shutdowns` через `aiohttp` з User-Agent браузера, далі `/ua/ajax` |
+| Сторонні залежності | немає | `curl_cffi` | немає |
+| Запасне джерело | дзеркало Baskerville42 | немає | немає |
+| Погодинний графік черги | так, історія 7 днів | так, на 8 днів уперед | ні, лише відключення за адресою |
+| Тижневий графік можливих відключень | так, коли ДТЕК його показує | так, коли ДТЕК його показує | ні |
+| Відключення за адресою | тип, причина, початок, орієнтовне відновлення | тип, опис, початок, кінець | причина, наступне відключення, відновлення |
+| Будинок із кількома чергами | крок вибору своєї черги | усі черги разом, подія календаря знає свою | перша черга зі списку |
+| Перемикання сенсорів | точно в момент початку й кінця за графіком | за статусом адреси, з кожним опитуванням (5 хв) | з кожним опитуванням (15 хв) |
+| Події й попередження | 8 типів подій, попередження за N хв до початку й кінця | немає | немає |
+| Сервіси | `refresh`, `get_schedule` | немає | немає |
+| Коли ДТЕК не відповідає | працює на збереженому графіку, `data_status: stale`, дзеркало | «живі» календарі порожні, окремий календар «останній відомий графік» | сутності недоступні |
+| Додавання без доступу до ДТЕК | так, лише за чергою (графік з дзеркала) | ні | так, ручне введення черги |
+| Особистий кабінет ДТЕК | ні | ні | так, вхід за телефоном і паролем |
+| Мови інтерфейсу | українська, англійська, російська; окремий вибір мови назв | українська, англійська | англійська, нідерландська, українська |
+| Мінімальна версія HA | 2025.8 | 2026.3 | 2026.9 |
+| Ліцензія | MIT | PolyForm Noncommercial 1.0.0 (не відкрита ліцензія за OSI) | MIT |
 
-## License
+Кілька пояснень до таблиці:
+
+- Сторінку `/ua/shutdowns` на КРЕМ закриває JavaScript-перевірка Incapsula. 18.10.2026 звичайний запит до неї отримав 212-байтну заглушку без CSRF-токена. DTEK Monitor проходить цю перевірку імітацією браузера. DTEK Outages шукає токен саме в цій сторінці, тож для КРЕМ залежить від того, чи пропустить його Incapsula. Ця інтеграція сторінку не завантажує.
+- DTEK Outages визначає тип відключення за кодом `type`: `1` — планові роботи, `2` — аварійне. На КРЕМ код `2` мають і стабілізаційні відключення за графіком, тож вони показуються як аварійні. Ця інтеграція й DTEK Monitor визначають тип за текстом причини.
+- DTEK Monitor підтримує чотирьох операторів і дуже суворо стежить за свіжістю даних. DTEK Outages, крім адресних відключень, показує дані особистого кабінету: баланс, лічильник, договір.
+
+### Що взято з цих проєктів
+
+У версії 0.1.3 сюди перенесено ідеї (не код) з обох проєктів:
+
+- з DTEK Monitor:
+  - прапорці сторінки ДТЕК: прихований графік на день чи тижневий графік не показується;
+  - будинок, який ДТЕК подає кількома записами, по одному на відключення;
+  - позначка стороннього оператора (`external_operator`);
+  - сенсор зв'язку з ДТЕК і атрибути `data_status` / `last_verified_at`;
+  - збільшення інтервалу після збоїв з випадковим розкидом;
+  - окремі сенсори стану адреси й орієнтовного відновлення;
+- з DTEK Outages:
+  - додавання запису лише за чергою, коли ДТЕК недоступний;
+  - пошук номера будинку без огляду на регістр, пробіли й латинські літери;
+  - приклад нагадування за календарем.
+
+Свідомо не перенесено:
+
+- **Імітацію браузера для інших операторів.** Обходити перевірку від ботів ця інтеграція не буде.
+- **Особистий кабінет.** Довелося б зберігати телефон і пароль від рахунку.
+- **Кілька черг в одному записі.** Квартира живиться від однієї лінії; якщо потрібно кілька, додайте кілька записів.
+
+## Атрибуція
+
+Дані про відключення надає ДТЕК Київські регіональні електромережі; кожна сутність має атрибуцію `Data provided by DTEK Kyiv Regional Electric Networks`. Запасна копія — з [Baskerville42/outage-data-ua](https://github.com/Baskerville42/outage-data-ua).
+
+## Релізи
+
+Workflow `Tag & Release` запускається на кожен push у `main` і читає `version` з `custom_components/dtek_krem_outages/manifest.json`, єдиного місця, де живе версія. Спершу він проганяє тести, hassfest і валідацію HACS. Якщо вони пройшли, а тегу чи GitHub-релізу для цієї версії ще немає, workflow створює те, чого бракує, і HACS пропонує реліз як оновлення. Нотатки релізу — це секція версії в `CHANGELOG.md`. Щоб випустити реліз:
+
+1. Підніміть `version` у `manifest.json`.
+2. Додайте секцію `## [X.Y.Z] - YYYY-MM-DD` у `CHANGELOG.md` (її наявність перевіряє тест).
+3. Зробіть push у `main`.
+
+## Ліцензія
 
 [MIT](LICENSE)

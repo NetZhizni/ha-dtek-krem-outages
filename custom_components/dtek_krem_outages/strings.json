@@ -41,6 +41,28 @@
         "data": {
           "group": "Group"
         }
+      },
+      "unreachable": {
+        "title": "DTEK is unavailable",
+        "description": "The list of settlements could not be loaded from DTEK. Try again later, or follow a group without an address: the schedule then comes from the public mirror github.com/Baskerville42/outage-data-ua, and the address data (group detection, outages at the address) is not available. The address can be added later with Reconfigure.",
+        "menu_options": {
+          "user": "Try again",
+          "group_only": "Follow a group without an address"
+        }
+      },
+      "group_only": {
+        "title": "Group without an address",
+        "description": "The schedule of the group comes from the public mirror of the DTEK data. Your group is shown on dtek-krem.com.ua after you enter the address.",
+        "data": {
+          "group": "Group",
+          "name": "Name",
+          "language": "Language of entity names"
+        },
+        "data_description": {
+          "group": "Your group (\"черга\"), e.g. 3.1.",
+          "name": "Leave empty to use \"Group 3.1\".",
+          "language": "Names of the entities and calendar events, whatever the language of Home Assistant. Entity IDs stay in English."
+        }
       }
     },
     "error": {
@@ -53,6 +75,7 @@
     },
     "abort": {
       "already_configured": "This address is already configured.",
+      "group_configured": "An entry for this group without an address is already configured.",
       "reconfigure_successful": "Re-configuration was successful."
     }
   },
@@ -73,7 +96,7 @@
           "warn_before_start": "Tick how long before a scheduled outage to send the \"outage_warning\" event. Nothing ticked turns it off.",
           "warn_before_end": "Tick how long before a scheduled outage ends to send the \"outage_end_warning\" event. Nothing ticked turns it off.",
           "use_mirror": "When DTEK can't be reached, take the schedule from the public mirror github.com/Baskerville42/outage-data-ua.",
-          "show_possible": "Fill days without an actual schedule with the weekly schedule of possible outages.",
+          "show_possible": "Fill days without an actual schedule with the weekly schedule of possible outages, while DTEK shows that schedule on its website.",
           "language": "Names of the entities and calendar events, whatever the language of Home Assistant. Entity IDs stay in English."
         }
       }
@@ -126,6 +149,24 @@
       }
     },
     "sensor": {
+      "address_status": {
+        "name": "Address status",
+        "state": {
+          "none": "No outage",
+          "stabilization": "Stabilization outage",
+          "emergency": "Emergency outage",
+          "planned": "Planned works",
+          "other": "Other outage"
+        }
+      },
+      "connection": {
+        "name": "DTEK connection",
+        "state": {
+          "ok": "OK",
+          "mirror": "Backup source",
+          "offline": "Offline, stored data"
+        }
+      },
       "group": {
         "name": "Group"
       },
@@ -143,6 +184,9 @@
       },
       "outages_tomorrow": {
         "name": "Outages tomorrow"
+      },
+      "restoration": {
+        "name": "Estimated restoration"
       },
       "schedule_updated": {
         "name": "Schedule updated"

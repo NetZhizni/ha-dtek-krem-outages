@@ -1,0 +1,59 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "address_outage": {
+        "default": "mdi:home-lightning-bolt-outline",
+        "state": {
+          "on": "mdi:transmission-tower-off"
+        }
+      },
+      "scheduled_outage": {
+        "default": "mdi:lightning-bolt",
+        "state": {
+          "on": "mdi:lightning-bolt-outline"
+        }
+      }
+    },
+    "calendar": {
+      "outages": {
+        "default": "mdi:calendar-clock"
+      }
+    },
+    "event": {
+      "events": {
+        "default": "mdi:bell-ring-outline"
+      }
+    },
+    "sensor": {
+      "group": {
+        "default": "mdi:format-list-numbered"
+      },
+      "last_update": {
+        "default": "mdi:cloud-check-outline"
+      },
+      "next_outage": {
+        "default": "mdi:power-plug-off-outline"
+      },
+      "outage_end": {
+        "default": "mdi:power-plug-outline"
+      },
+      "outages_today": {
+        "default": "mdi:timer-outline"
+      },
+      "outages_tomorrow": {
+        "default": "mdi:timer-sand"
+      },
+      "schedule_updated": {
+        "default": "mdi:update"
+      }
+    }
+  },
+  "services": {
+    "get_schedule": {
+      "service": "mdi:calendar-text"
+    },
+    "refresh": {
+      "service": "mdi:refresh"
+    }
+  }
+}

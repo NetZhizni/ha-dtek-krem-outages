@@ -1,0 +1,12 @@
+{
+  "domain": "dtek_krem_outages",
+  "name": "DTEK KREM Outages",
+  "codeowners": ["@NetZhizni"],
+  "config_flow": true,
+  "documentation": "https://github.com/NetZhizni/ha-dtek-krem-outages",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/NetZhizni/ha-dtek-krem-outages/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

@@ -114,8 +114,13 @@ DEFAULT_OPTIONS: Final[dict[str, object]] = {
 }
 
 # A group DTEK stops listing for the house is dropped after this many answers
-# in a row without it; a new group is taken at once.
+# in a row without it; a new group is taken at once. A main group detected
+# automatically moves to the group DTEK lists alone after as many answers in a
+# row that list it alone.
 GROUP_REMOVAL_UPDATES: Final = 3
+# The ``refresh`` service asks again only this many seconds after the last
+# update, so an automation calling it often doesn't flood DTEK.
+REFRESH_COOLDOWN: Final = 60
 
 # Every event goes to the bus as EVENT_BUS with ``type`` set to one of these,
 # and to the event entity with the same event type.
@@ -180,6 +185,11 @@ GROUPS_STATUSES: Final = (
     GROUPS_STATUS_MAIN_SOME,
     GROUPS_STATUS_MAIN_ALL,
 )
+# ``power`` of a run of the groups status: what the schedule the entities
+# follow says for it, so it depends on ``groups_mode``.
+POWER_ON: Final = "on"
+POWER_OFF: Final = "off"
+POWER_MAYBE: Final = "maybe"
 # Entities that need an address; an entry set up by group only has none.
 ADDRESS_ENTITIES: Final = (
     ("binary_sensor", "address_outage"),

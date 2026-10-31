@@ -42,6 +42,13 @@
           "group": "Group"
         }
       },
+      "group_outage": {
+        "title": "Group",
+        "description": "DTEK reports a stabilization outage for {settlement}, {street}, {house}, and while it lasts DTEK lists only the group of that outage ({groups}): the house may have other groups too. Choose the main group, the one whose schedule to follow. If you are not sure, keep {groups}: the entry then follows the group DTEK lists, and the other groups of the house are followed once DTEK lists them again.",
+        "data": {
+          "group": "Group"
+        }
+      },
       "unreachable": {
         "title": "DTEK is unavailable",
         "description": "The list of settlements could not be loaded from DTEK. Try again later, or follow a group without an address: the schedule then comes from the public mirror github.com/Baskerville42/outage-data-ua, and the address data (group detection, outages at the address) is not available. The address can be added later with Reconfigure.",
@@ -242,7 +249,7 @@
   "services": {
     "refresh": {
       "name": "Refresh",
-      "description": "Fetches the schedule and the address status now.",
+      "description": "Fetches the schedule and the address status now. An entry updated less than a minute ago keeps the result of that update.",
       "fields": {
         "config_entry_id": {
           "name": "Entry",

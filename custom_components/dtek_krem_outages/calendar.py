@@ -13,6 +13,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CALENDAR_TEXT,
+    GROUPS,
     OUTAGE_KIND_STABILIZATION,
     POSSIBLE_DAYS_AHEAD,
     group_name,
@@ -146,7 +147,7 @@ class OutageCalendar(_DtekCalendar):
             label = self._label([data.group, *data.extra_groups])
 
             def describe(item: Interval) -> str:
-                groups = coordinator.groups_in(item)
+                groups = data.groups_in(item, coordinator.tz)
                 return self._label(groups) if groups else label
 
             events = self._schedule_events(
@@ -183,7 +184,9 @@ class OtherGroupsCalendar(_DtekCalendar):
     """Outages of the other groups of the address, each named with its group.
 
     Empty while DTEK lists one group for the house (or, for an entry without
-    an address, while no other group is chosen in the options).
+    an address, while no other group is chosen in the options). A group DTEK
+    no longer lists keeps what already happened, as long as the past days of
+    the schedule; one left out in the options is gone at once.
     """
 
     def __init__(self, coordinator: DtekCoordinator) -> None:
@@ -195,12 +198,16 @@ class OtherGroupsCalendar(_DtekCalendar):
         text = self._text()
         entry_id = self.coordinator.config_entry.entry_id
         events: list[CalendarEvent] = []
-        for group in data.extra_groups:
+        for group in GROUPS:
+            followed = group in data.extra_groups
+            if not followed and group not in data.other_days:
+                continue
             label = f"{text['group']} {group_name(group)}"
             events.extend(
                 self._schedule_events(
-                    data.group_days.get(group, {}),
-                    data.group_presets.get(group, {}),
+                    data.other_days.get(group, {}),
+                    # Only a group followed now has days ahead.
+                    data.group_presets.get(group, {}) if followed else {},
                     label,
                     f"{entry_id}-{group}",
                     prefix=f"{label}: ",

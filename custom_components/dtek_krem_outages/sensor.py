@@ -17,6 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
+from .api import format_iso
 from .const import (
     ADDRESS_STATUS_NONE,
     ADDRESS_STATUSES,
@@ -29,6 +30,9 @@ from .const import (
     GROUPS_STATUS_OTHERS_SOME,
     GROUPS_STATUSES,
     OUTAGE_KIND_OTHER,
+    POWER_MAYBE,
+    POWER_OFF,
+    POWER_ON,
     group_name,
 )
 from .coordinator import DtekConfigEntry, DtekCoordinator
@@ -36,6 +40,7 @@ from .entity import DtekEntity
 from .schedule import (
     SLOT_MAYBE,
     SLOT_OFF,
+    SLOT_ON,
     SLOTS_PER_DAY,
     format_intervals,
     intervals,
@@ -44,6 +49,8 @@ from .schedule import (
 )
 
 PARALLEL_UPDATES = 0
+
+_POWER = {SLOT_ON: POWER_ON, SLOT_OFF: POWER_OFF, SLOT_MAYBE: POWER_MAYBE}
 
 
 def _day_value(coordinator: DtekCoordinator, day: date) -> float | None:
@@ -110,7 +117,7 @@ def _status(main_off: bool, others_off: int, extras: int) -> str:
 def _groups_status(coordinator: DtekCoordinator, now: datetime) -> str:
     """Return which of the followed groups are off now, by their own schedule."""
     data = coordinator.data
-    off = coordinator.groups_off(now)
+    off = data.groups_off(now, coordinator.tz)
     return _status(
         data.group in off,
         len([g for g in off if g != data.group]),
@@ -124,15 +131,20 @@ def _groups_status_day(
     """Return the whole day as runs of one status with the same groups off.
 
     None while no followed group has a schedule for the day. A group without
-    one counts as power on.
+    one counts as power on. ``power`` of a run is what the schedule the
+    entities follow says, so it follows ``groups_mode``: with the main group
+    alone, that group being off is no power at all. It is None while that
+    schedule has no such day.
     """
     data = coordinator.data
     schedules = {g: days[day] for g, days in data.group_days.items() if day in days}
     if not schedules:
         return None
-    # Each distinct status and set of groups off gets a letter, so the runs
-    # come from ``intervals`` like the outages do, right across a DST change.
-    runs: list[tuple[str, tuple[str, ...]]] = []
+    shown = data.days.get(day)
+    # Each distinct status, set of groups off and power gets a letter, so the
+    # runs come from ``intervals`` like the outages do, right across a DST
+    # change.
+    runs: list[tuple[str, tuple[str, ...], str | None]] = []
     letters = []
     for index in range(SLOTS_PER_DAY):
         off = tuple(g for g, slots in schedules.items() if slots[index] == SLOT_OFF)
@@ -143,6 +155,7 @@ def _groups_status_day(
                 len(data.extra_groups),
             ),
             off,
+            _POWER[shown[index]] if shown is not None else None,
         )
         if run not in runs:
             runs.append(run)
@@ -151,13 +164,14 @@ def _groups_status_day(
     kinds = {chr(ord("a") + i) for i in range(len(runs))}
     result = []
     for item in intervals({day: "".join(letters)}, tz, kinds):
-        status, off = runs[ord(item.kind) - ord("a")]
+        status, off, power = runs[ord(item.kind) - ord("a")]
         result.append(
             {
                 **item.as_dict(tz),
                 "state": status,
                 "level": GROUPS_STATUSES.index(status),
                 "groups": [group_name(g) for g in off],
+                "power": power,
             }
         )
     return result
@@ -169,7 +183,7 @@ def _groups_status_attributes(
     data = coordinator.data
     today = _today(coordinator, now)
     return {
-        "groups_off": [group_name(g) for g in coordinator.groups_off(now)],
+        "groups_off": [group_name(g) for g in data.groups_off(now, coordinator.tz)],
         "main_group": group_name(data.group),
         "extra_groups": [group_name(g) for g in data.extra_groups],
         "level": GROUPS_STATUSES.index(_groups_status(coordinator, now)),
@@ -204,8 +218,8 @@ def _connection_attributes(
     publication = data.publication
     interval = coordinator.update_interval
     return {
-        "last_success": _isoformat(data.last_success),
-        "last_dtek_success": _isoformat(data.last_dtek_success),
+        "last_success": format_iso(data.last_success),
+        "last_dtek_success": format_iso(data.last_dtek_success),
         "consecutive_failures": data.consecutive_failures,
         "update_interval_minutes": round(interval.total_seconds() / 60, 1)
         if interval
@@ -218,10 +232,6 @@ def _connection_attributes(
         else not publication.daily_hidden,
         "weekly_schedule_shown": publication.weekly,
     }
-
-
-def _isoformat(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
 
 
 def _next_outage_attributes(
@@ -390,8 +400,11 @@ class DtekSensor(DtekEntity, SensorEntity):
 
     entity_description: DtekSensorDescription
     # The whole-day timelines of the groups status change with the schedule
-    # and are there for charts, not for history.
-    _unrecorded_attributes = frozenset({"today", "tomorrow"})
+    # and are there for charts, not for history. The last successes (of the
+    # connection sensor too) change with every update.
+    _unrecorded_attributes = frozenset(
+        {"today", "tomorrow", "last_verified_at", "last_success", "last_dtek_success"}
+    )
 
     def __init__(
         self, coordinator: DtekCoordinator, description: DtekSensorDescription

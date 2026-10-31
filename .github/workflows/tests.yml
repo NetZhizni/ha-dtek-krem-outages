@@ -28,3 +28,19 @@ jobs:
           ruff format --check .
       - name: Pytest
         run: pytest -q
+
+  tests-min:
+    # hacs.json promises Home Assistant 2025.8.0: test it, not only the latest.
+    name: Pytest on the oldest Home Assistant supported
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements_test_min.txt
+      - name: Install dependencies
+        run: pip install -r requirements_test_min.txt
+      - name: Pytest
+        run: pytest -q

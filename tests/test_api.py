@@ -374,6 +374,35 @@ async def test_mirror(client: DtekClient, fake_dtek: FakeDtek) -> None:
         await client.async_get_mirror()
 
 
+async def test_mirror_not_modified(client: DtekClient, fake_dtek: FakeDtek) -> None:
+    """An unchanged mirror file is not downloaded again."""
+    first = await client.async_get_mirror()
+    assert await client.async_get_mirror() is first
+    assert fake_dtek.mirror_not_modified == 1
+
+    fake_dtek.mirror_update = "18.10.2026 10:00"
+    changed = await client.async_get_mirror()
+    assert changed.fact.update == "18.10.2026 10:00"
+    assert fake_dtek.mirror_not_modified == 1
+    assert fake_dtek.mirror_requests == 3
+
+
+def test_stabilization_lists_groups_partly() -> None:
+    """A stabilization outage of the house marks its group list as partial."""
+    stabilization = make_house(
+        ["GPV3.1"],
+        reason="Стабілізаційне відключення (Згідно графіку погодинних відключень)",
+        start="12:00 18.10.2026",
+        end="14:00 18.10.2026",
+    )
+    assert House.from_api("5", stabilization, KYIV).groups_partial
+    emergency = make_house(["GPV3.1"], reason="Аварійні ремонтні роботи")
+    assert not House.from_api("5", emergency, KYIV).groups_partial
+    assert not House.from_api("5", make_house(["GPV3.1"]), KYIV).groups_partial
+    # One stabilization record among several is enough.
+    assert House.from_api("5", [emergency, stabilization], KYIV).groups_partial
+
+
 async def test_shared_client(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:
     """All entries share one client."""
     assert await async_get_client(hass) is await async_get_client(hass)

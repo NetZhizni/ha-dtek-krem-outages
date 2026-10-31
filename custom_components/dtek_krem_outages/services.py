@@ -16,6 +16,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.util import dt as dt_util
 
 from .const import ATTR_CONFIG_ENTRY_ID, DOMAIN
 from .coordinator import DtekCoordinator
@@ -56,8 +57,12 @@ def _get_coordinators(hass: HomeAssistant, call: ServiceCall) -> list[DtekCoordi
 
 
 async def _async_refresh(call: ServiceCall) -> None:
+    """Update now; an entry updated less than a minute ago keeps that result."""
     coordinators = _get_coordinators(call.hass, call)
-    await asyncio.gather(*(c.async_refresh() for c in coordinators))
+    now = dt_util.utcnow()
+    await asyncio.gather(
+        *(c.async_refresh() for c in coordinators if c.refresh_due(now))
+    )
     if failed := [
         c.config_entry.title
         for c in coordinators

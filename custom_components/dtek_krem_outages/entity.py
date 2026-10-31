@@ -20,6 +20,9 @@ class DtekEntity(CoordinatorEntity[DtekCoordinator]):
 
     _attr_has_entity_name = True
     _attr_attribution = ATTRIBUTION
+    # Changes with every update; recording it would store the other
+    # attributes again every few minutes.
+    _unrecorded_attributes = frozenset({"last_verified_at"})
 
     def __init__(self, coordinator: DtekCoordinator, key: str) -> None:
         """Initialize the entity."""

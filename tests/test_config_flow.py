@@ -43,7 +43,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.setup import async_setup_component
 
-from .conftest import GROUP, HOUSE, SETTLEMENT, STREET, TITLE, FakeDtek, setup_entry
+from .conftest import (
+    GROUP,
+    HOUSE,
+    SETTLEMENT,
+    STREET,
+    TITLE,
+    FakeDtek,
+    make_house,
+    setup_entry,
+)
 
 
 async def start(hass: HomeAssistant) -> dict[str, Any]:
@@ -240,6 +249,34 @@ async def test_house_with_several_groups(
     assert result["options"][CONF_GROUPS_MODE] == "main"
     assert result["data"][CONF_GROUP] == "GPV4.2"
     assert result["data"][CONF_GROUP_MANUAL] is True
+
+
+async def test_house_during_stabilization_outage(
+    hass: HomeAssistant, fake_dtek: FakeDtek
+) -> None:
+    """The group of a stabilization outage alone: every group is offered."""
+    fake_dtek.houses["2"] = make_house(
+        ["GPV4.2"],
+        reason="Стабілізаційне відключення (Згідно графіку погодинних відключень)",
+        start="10:00 18.10.2026",
+        end="14:00 18.10.2026",
+    )
+    for choice, manual in (("GPV4.2", False), ("GPV3.2", True)):
+        result = await start(hass)
+        result = await submit(hass, result, {CONF_SETTLEMENT: SETTLEMENT})
+        result = await submit(hass, result, {CONF_STREET: STREET})
+        result = await submit(hass, result, {CONF_HOUSE: "2"})
+        assert result["step_id"] == "group_outage"
+        assert result["description_placeholders"]["groups"] == "4.2"
+        assert len(options_of(result, CONF_GROUP)) == 12
+        result = await submit(hass, result, {CONF_GROUP: choice})
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        # Keeping the listed group leaves it to DTEK, as without the outage.
+        assert result["data"][CONF_GROUP] == choice
+        assert result["data"][CONF_GROUP_MANUAL] is manual
+        entry = hass.config_entries.async_entries(DOMAIN)[0]
+        assert await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
 
 
 async def test_house_without_group(hass: HomeAssistant, fake_dtek: FakeDtek) -> None:

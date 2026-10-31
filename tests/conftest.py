@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import date, datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,8 @@ class FakeDtek:
         self.issued_tokens = 0
         self.forms: list[dict[str, str]] = []
         self.mirror_requests = 0
+        # Mirror requests answered with HTTP 304 Not Modified.
+        self.mirror_not_modified = 0
 
     @property
     def cookie_value(self) -> str:
@@ -256,31 +259,38 @@ class FakeDtek:
     async def mirror(
         self, method: str, url: Any, data: Any
     ) -> AiohttpClientMockResponse:
-        """Answer a GET of the mirror file."""
+        """Answer a GET of the mirror file with an ETag, as GitHub does."""
         self.mirror_requests += 1
         if self.mirror_error is not None:
             raise self.mirror_error
         if self.mirror_status != 200:
             return AiohttpClientMockResponse(method, url, status=self.mirror_status)
         days = self.days if self.mirror_days is None else self.mirror_days
-        return self._json(
-            method,
-            url,
-            {
-                "regionId": "kyiv-region",
-                "lastUpdated": "2026-10-18T07:00:00.000Z",
-                "fact": make_fact(days, self.mirror_update),
-                "preset": make_preset(self.weekly, self.mirror_update),
-            },
-        )
+        payload = {
+            "regionId": "kyiv-region",
+            "lastUpdated": "2026-10-18T07:00:00.000Z",
+            "fact": make_fact(days, self.mirror_update),
+            "preset": make_preset(self.weekly, self.mirror_update),
+        }
+        text = json.dumps(payload, ensure_ascii=False)
+        etag = f'"{hashlib.sha256(text.encode()).hexdigest()[:16]}"'
+        headers = self._mock.mock_calls[-1][3] or {}
+        if headers.get("If-None-Match") == etag:
+            self.mirror_not_modified += 1
+            return AiohttpClientMockResponse(
+                method, url, status=304, headers={"ETag": etag}
+            )
+        return self._json(method, url, payload, {"ETag": etag})
 
     @staticmethod
-    def _json(method: str, url: Any, payload: Any) -> AiohttpClientMockResponse:
+    def _json(
+        method: str, url: Any, payload: Any, headers: dict[str, str] | None = None
+    ) -> AiohttpClientMockResponse:
         return AiohttpClientMockResponse(
             method,
             url,
             text=json.dumps(payload, ensure_ascii=False),
-            headers={"Content-Type": "text/html; charset=UTF-8"},
+            headers={"Content-Type": "text/html; charset=UTF-8", **(headers or {})},
         )
 
     @property

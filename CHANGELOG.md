@@ -3,6 +3,28 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] - 2026-10-31
+
+### Added
+- `power` in the `today` / `tomorrow` runs of `sensor.…_groups_status`: `on`, `off` or `maybe` by the schedule the entities follow, so by the "Other groups of the address in the schedule" option; `null` when that schedule has no such day.
+- Config flow: when DTEK reports a stabilization outage for the house and lists its group alone, the group step offers every group with that one chosen. Keeping it leaves the group to DTEK as before; another one counts as chosen by you and is never replaced.
+- Diagnostics show the counters of the groups (answers in a row without a group, answers listing only another group), whether the whole schedule is asked for, and the past of the other groups.
+- CI runs the tests on the oldest Home Assistant supported, 2025.8.0, too (`requirements_test_min.txt`).
+
+### Fixed
+- The other groups of the house were dropped while DTEK reported a stabilization outage for it, and came back when it ended, each time with a `groups_changed` event both ways: during such an outage DTEK lists only the group of that outage. While it lasts, no group is dropped now, one already missing from the answers before included, and the main group doesn't move; a group DTEK adds is still taken. Emergency outages and planned works don't shorten the group list.
+- A main group detected automatically moved to another group after a single answer that listed only that group, e.g. right after a stabilization outage of the other group, and stayed there when its own group was listed again. It moves now after three answers in a row (about 15 min with a 5 min interval) and never during a stabilization outage; `group_changed` no longer comes on the first update.
+- The past outages of a group DTEK no longer lists vanished from `calendar.…_other_groups`. They stay for 7 days now, like the past schedule of the main group, also after a restart and when the group comes back. A group ticked in "Leave out groups" leaves the calendar with its past, as before.
+- An answer of DTEK without the house cleared the outage reported for it, with `address_outage` events `cleared` and then `new` when the house was back. Such an answer changes nothing now, and the address entities are unavailable until DTEK lists the house again.
+- An outage at the address whose start DTEK corrected while it was going on was shown twice in the calendar: until the correction and again with the new start. One of the same kind overlapping it is the same outage now, with an `updated` event.
+- The entities with `last_verified_at` wrote all their attributes to the recorder again with every update, and so did the connection sensor with `last_success` and `last_dtek_success`. These attributes are no longer recorded.
+- The timer of outage edges and warnings could go off between the two requests of an update and work on a half applied answer. It is off from the first answer until the update ends, which evaluates what it would have met.
+
+### Changed
+- `refresh` asks DTEK again only a minute after the last update of an entry; a call sooner gives the result of that update.
+- The mirror is asked for with `If-None-Match`: an unchanged file is not downloaded again.
+- README (Ukrainian and English): the "Schedule by group" card goes by `power`. With the main group alone, or in the default mode, an outage of the main group now reads "no power" instead of "maybe no power"; which groups are off is named only when there are several; while works at the address are going on, the current period says the power is on by the group schedule only; a day the schedule of the entities doesn't have yet reads "not published yet". Both Markdown cards show the times in Kyiv time like the schedule, whatever the time zone of Home Assistant. A note on entity IDs that start with the name of the area for entities added by updates when the device is in an area, also in the troubleshooting table. The rules for the main group and for a stabilization outage, the corrected start of address works, a missing house, `possible_outage_warning` (the schedule of the day, not the weekly one) and `last_verified_at` in the recorder are described, the stabilization outage in the known limitations too.
+
 ## [0.1.6] - 2026-10-26
 
 ### Added
@@ -67,7 +89,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 - Language of entity names: Ukrainian (default), English or Russian, chosen with the house and changeable in the options. Entity names and calendar texts follow it instead of the Home Assistant language, which is often left English while the interface is Ukrainian. Entity IDs are still English (`sensor.home_next_outage`). Existing entries switch to Ukrainian names.
 - Russian translation of the config and options flows, entities, services and errors.
-
 - Warnings before an outage starts and before it ends (power returns) are checkboxes in the options now (1, 5, 10, 15, 30, 60, 120 minutes), e.g. 30 and 5 together. The new event `outage_end_warning` fires before an outage ends; `outage_warning` fires once for each ticked time (one event when a new outage starts sooner than several of them). The old single number is read as the "before start" time, so existing entries keep their 30 minutes.
 
 ### Changed

@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import aiohttp
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.dtek_krem_outages.const import ATTR_CONFIG_ENTRY_ID, DOMAIN
+from custom_components.dtek_krem_outages.const import (
+    ATTR_CONFIG_ENTRY_ID,
+    DOMAIN,
+    REFRESH_COOLDOWN,
+)
 from custom_components.dtek_krem_outages.diagnostics import (
     async_get_config_entry_diagnostics,
 )
@@ -57,18 +64,54 @@ async def test_get_schedule(
 
 
 async def test_refresh(
-    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
 ) -> None:
     """Refresh fetches again and reports when no source answered."""
     await setup_entry(hass, mock_config_entry)
     count = len(fake_dtek.schedule_forms)
+    frozen_now.tick(timedelta(seconds=REFRESH_COOLDOWN))
     await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
     assert len(fake_dtek.schedule_forms) == count + 1
 
     fake_dtek.ajax_error = aiohttp.ClientConnectionError()
     # The mirror still answers: that is not a failure.
+    frozen_now.tick(timedelta(seconds=REFRESH_COOLDOWN))
     await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
     fake_dtek.mirror_error = aiohttp.ClientConnectionError()
+    frozen_now.tick(timedelta(seconds=REFRESH_COOLDOWN))
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
+
+
+async def test_refresh_cooldown(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """Calls within a minute of the last update don't ask DTEK again."""
+    await setup_entry(hass, mock_config_entry)
+    count = len(fake_dtek.schedule_forms)
+    for _ in range(5):
+        await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
+    assert len(fake_dtek.schedule_forms) == count
+
+    frozen_now.tick(timedelta(seconds=REFRESH_COOLDOWN - 1))
+    await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
+    assert len(fake_dtek.schedule_forms) == count
+    frozen_now.tick(timedelta(seconds=1))
+    await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
+    assert len(fake_dtek.schedule_forms) == count + 1
+
+    # A failed update is reported again while it is the last one.
+    fake_dtek.ajax_error = aiohttp.ClientConnectionError()
+    fake_dtek.mirror_error = aiohttp.ClientConnectionError()
+    frozen_now.tick(timedelta(seconds=REFRESH_COOLDOWN))
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(DOMAIN, "refresh", {}, blocking=True)
 
@@ -110,6 +153,29 @@ async def test_diagnostics(
     assert result["entry"]["data"]["group"] == GROUP
     assert result["state"]["street"] == "**REDACTED**"
     assert result["state"]["days"][TODAY.isoformat()]["outage_minutes"] == 270
+    coordinator = result["coordinator"]
+    assert coordinator["group_manual"] is False
+    assert coordinator["missing_groups"] == {}
+    assert coordinator["main_candidate"] is None
+    assert coordinator["full_fact_needed"] is False
+    assert coordinator["other_days"] == {}
+
+
+async def test_diagnostics_of_groups(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The counters of the groups and the other groups calendar are shown."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    await setup_entry(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house(["GPV4.2"])
+    await mock_config_entry.runtime_data.async_refresh()
+    result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
+    coordinator = result["coordinator"]
+    assert coordinator["missing_groups"] == {}
+    assert coordinator["main_candidate"] == {"group": "GPV4.2", "answers": 1}
+    assert coordinator["other_days"] == {
+        "GPV4.2": {TODAY.isoformat(): slots(("08:00", "12:00"))}
+    }
 
 
 async def test_get_schedule_other_groups(

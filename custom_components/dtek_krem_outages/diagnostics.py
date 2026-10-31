@@ -1,7 +1,10 @@
 """Diagnostics for DTEK KREM Outages.
 
 The street and house number are redacted; the settlement and group stay,
-since the schedule can't be understood without them.
+since the schedule can't be understood without them. The state the
+coordinator keeps between updates (answers counted before a group is dropped
+or the main group moves, the past of the other groups) helps with the reports
+about groups.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ async def async_get_config_entry_diagnostics(
             "update_interval_seconds": coordinator.update_interval.total_seconds()
             if coordinator.update_interval
             else None,
+            **coordinator.diagnostics_state(),
         },
         "state": async_redact_data(coordinator.schedule_dict(), TO_REDACT)
         if coordinator.data

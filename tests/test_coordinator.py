@@ -24,6 +24,7 @@ from custom_components.dtek_krem_outages.const import (
     DOMAIN,
     EVENT_BUS,
     FORCE_UPDATE_FACT,
+    GROUP_REMOVAL_UPDATES,
     SOURCE_DTEK,
     SOURCE_MIRROR,
     STORAGE_VERSION,
@@ -387,9 +388,17 @@ async def test_group_change_by_dtek(
     await setup_entry(hass, mock_config_entry)
     events = async_capture_events(hass, EVENT_BUS)
 
+    # The new group alone is followed besides the main one for two answers.
     fake_dtek.houses[HOUSE] = make_house(["GPV4.2"])
-    await refresh(hass, mock_config_entry)
+    for _ in range(GROUP_REMOVAL_UPDATES - 1):
+        await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.group == GROUP
+    assert mock_config_entry.runtime_data.data.extra_groups == ["GPV4.2"]
+    assert bus_events(events, "group_changed") == []
+    events.clear()
 
+    # The third answer in a row moves the main group.
+    await refresh(hass, mock_config_entry)
     assert mock_config_entry.data[CONF_GROUP] == "GPV4.2"
     data = mock_config_entry.runtime_data.data
     assert data.group == "GPV4.2"
@@ -398,6 +407,8 @@ async def test_group_change_by_dtek(
     types = [e["type"] for e in bus_events(events)]
     assert types[0] == "group_changed"
     assert "schedule_changed" in types
+    # The main group moving out of the other groups is no news.
+    assert "groups_changed" not in types
     changed = bus_events(events, "group_changed")[0]
     assert changed["previous_group"] == GROUP
     assert changed["group"] == "GPV4.2"
@@ -790,6 +801,7 @@ async def test_group_only_without_mirror_retries(
 
 OTHER = "GPV4.2"
 COMBINED = {**DEFAULT_OPTIONS, CONF_GROUPS_MODE: "any"}
+STABILIZATION = "Стабілізаційне відключення (Згідно графіку погодинних відключень)"
 
 
 async def test_other_group_added_and_removed(
@@ -852,6 +864,118 @@ async def test_other_group_added_and_removed(
     assert removed["removed"] == ["4.2"]
     assert removed["extra_groups"] == []
     assert bus_events(events, "schedule_changed") == []
+
+
+async def test_outage_lists_its_groups_only(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """While DTEK reports an outage for the house, no group is dropped."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    # The site lists the group of a stabilization outage alone.
+    outage = {
+        "reason": STABILIZATION,
+        "start": "12:00 18.10.2026",
+        "end": "14:00 18.10.2026",
+    }
+    fake_dtek.houses[HOUSE] = make_house([GROUP], **outage)
+    for _ in range(4):
+        await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.address_outage is not None
+    assert data.extra_groups == [OTHER]
+    assert data.groups_at_address == [GROUP, OTHER]
+    assert data.group_days[OTHER] == {TODAY: slots(("08:00", "12:00"))}
+    assert bus_events(events, "groups_changed") == []
+
+    # A group DTEK adds meanwhile is taken.
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV5.1"], **outage)
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.extra_groups == [OTHER, "GPV5.1"]
+    assert bus_events(events, "groups_changed")[-1]["added"] == ["5.1"]
+
+    # Without the outage the list counts again.
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    for _ in range(3):
+        await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == []
+    assert data.groups_at_address == [GROUP]
+    assert bus_events(events, "groups_changed")[-1]["removed"] == ["4.2", "5.1"]
+
+
+async def test_main_group_kept_during_outage(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A lone group listed during an outage of the house is not the main one."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    fake_dtek.houses[HOUSE] = make_house(
+        [OTHER], reason=STABILIZATION, start="12:00 18.10.2026", end="14:00 18.10.2026"
+    )
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.group == GROUP
+    assert data.extra_groups == [OTHER]
+    assert bus_events(events, "group_changed") == []
+
+    # Listed alone without an outage, it is the group of the house.
+    fake_dtek.houses[HOUSE] = make_house([OTHER])
+    for _ in range(GROUP_REMOVAL_UPDATES):
+        await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.group == OTHER
+    assert len(bus_events(events, "group_changed")) == 1
+
+
+async def test_dropped_group_keeps_its_past(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    hass_storage: dict[str, Any],
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """A group DTEK stops listing keeps what happened, across a restart."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    fake_dtek.days[TOMORROW] = {GROUP: slots(), OTHER: slots(("06:00", "08:00"))}
+    await setup_entry(hass, mock_config_entry)
+    ahead = {TODAY: slots(("08:00", "12:00")), TOMORROW: slots(("06:00", "08:00"))}
+    assert mock_config_entry.runtime_data.data.other_days == {OTHER: ahead}
+
+    # 4.2 is off 08:00-12:00; DTEK stops listing it at 11:00.
+    frozen_now.move_to(kyiv(TODAY, "11:00"))
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    for _ in range(3):
+        await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == []
+    assert OTHER not in data.group_days
+    past = {OTHER: {TODAY: slots(("08:00", "11:00"))}}
+    assert data.other_days == past
+    assert stored(hass_storage)["other_days"] == {
+        OTHER: {TODAY.isoformat(): slots(("08:00", "11:00"))}
+    }
+
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert mock_config_entry.runtime_data.data.other_days == past
+
+    # Listed again, it has its days ahead back; the past is not rewritten.
+    frozen_now.move_to(kyiv(TODAY, "13:00"))
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.other_days == {
+        OTHER: {**ahead, TODAY: slots(("08:00", "11:00"))}
+    }
+
+    # Left out in the options, it is gone with its past.
+    hass.config_entries.async_update_entry(
+        mock_config_entry, options={**DEFAULT_OPTIONS, CONF_EXCLUDED_GROUPS: [OTHER]}
+    )
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    assert mock_config_entry.runtime_data.data.other_days == {}
 
 
 async def test_glitches_keep_other_groups(
@@ -964,7 +1088,8 @@ async def test_main_group_moves_to_other_group(
     events = async_capture_events(hass, EVENT_BUS)
 
     fake_dtek.houses[HOUSE] = make_house([OTHER])
-    await refresh(hass, mock_config_entry)
+    for _ in range(GROUP_REMOVAL_UPDATES):
+        await refresh(hass, mock_config_entry)
     data = mock_config_entry.runtime_data.data
     assert data.group == OTHER
     assert data.extra_groups == []
@@ -1130,3 +1255,207 @@ async def test_group_no_longer_excluded(
     # The mirror has the same version; the new group takes it.
     assert data.group_days[OTHER] == {TODAY: slots(("08:00", "12:00"))}
     assert bus_events(events, "groups_changed") == []
+
+
+STABILIZATION_OUTAGE = {
+    "reason": STABILIZATION,
+    "start": "10:00 18.10.2026",
+    "end": "14:00 18.10.2026",
+}
+
+
+async def test_short_list_before_the_outage(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A group already missing from one answer stays during the outage."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    # The short list comes one answer before the outage it belongs to.
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    await refresh(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([GROUP], **STABILIZATION_OUTAGE)
+    for _ in range(GROUP_REMOVAL_UPDATES):
+        await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == [OTHER]
+    assert data.groups_at_address == [GROUP, OTHER]
+
+    # Listed again after the outage, it counts its misses from the start.
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await refresh(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    for _ in range(GROUP_REMOVAL_UPDATES - 1):
+        await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.extra_groups == [OTHER]
+    assert bus_events(events, "groups_changed") == []
+
+
+async def test_short_list_after_the_outage(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """The short list one answer after the outage doesn't move the main group."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    fake_dtek.houses[HOUSE] = make_house([OTHER], **STABILIZATION_OUTAGE)
+    await refresh(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([OTHER])
+    await refresh(hass, mock_config_entry)
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await refresh(hass, mock_config_entry)
+
+    data = mock_config_entry.runtime_data.data
+    assert data.group == GROUP
+    assert data.extra_groups == [OTHER]
+    assert mock_config_entry.data[CONF_GROUP] == GROUP
+    assert bus_events(events, "group_changed") == []
+    assert bus_events(events, "outage_started") == []
+    assert bus_events(events, "groups_changed") == []
+
+
+async def test_short_list_with_nothing_known(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Without any group known yet, the short list doesn't move the main group."""
+    fake_dtek.houses[HOUSE] = make_house([OTHER], **STABILIZATION_OUTAGE)
+    events = async_capture_events(hass, EVENT_BUS)
+    await setup_entry(hass, mock_config_entry)
+    for _ in range(GROUP_REMOVAL_UPDATES):
+        await refresh(hass, mock_config_entry)
+
+    data = mock_config_entry.runtime_data.data
+    assert data.group == GROUP
+    assert data.extra_groups == [OTHER]
+    assert bus_events(events, "group_changed") == []
+
+
+async def test_other_outages_list_groups_fully(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Planned works don't shorten the list: a group DTEK drops goes."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, OTHER])
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    # Announced days ahead, the works don't hold the groups that long.
+    fake_dtek.houses[HOUSE] = make_house(
+        [GROUP],
+        reason="Планові ремонтні роботи",
+        start="09:00 22.10.2026",
+        end="17:00 22.10.2026",
+    )
+    for _ in range(GROUP_REMOVAL_UPDATES):
+        await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.extra_groups == []
+    assert bus_events(events, "groups_changed")[-1]["removed"] == ["4.2"]
+
+
+async def test_main_group_glitch(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """Answers that list another group alone must come in a row."""
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    for houses in ([OTHER], [OTHER], [GROUP], [OTHER], [OTHER], []):
+        fake_dtek.houses[HOUSE] = make_house(houses)
+        await refresh(hass, mock_config_entry)
+    # A missing house or an empty list doesn't break the row: no news.
+    del fake_dtek.houses[HOUSE]
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.group == GROUP
+    assert bus_events(events, "group_changed") == []
+
+    fake_dtek.houses[HOUSE] = make_house([OTHER])
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.group == OTHER
+    assert len(bus_events(events, "group_changed")) == 1
+
+
+async def test_missing_house_keeps_the_outage(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """An answer without the house tells nothing: no events, data unavailable."""
+    works = {
+        "reason": "Аварійні ремонтні роботи",
+        "start": "09:50 18.10.2026",
+        "end": "15:00 18.10.2026",
+    }
+    fake_dtek.houses[HOUSE] = make_house(**works)
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+    outage = mock_config_entry.runtime_data.data.address_outage
+
+    del fake_dtek.houses[HOUSE]
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.address_outage == outage
+    assert data.address_history == []
+    assert not data.address_ok
+    sensor = get_entity_id(hass, "binary_sensor", "address_outage")
+    assert hass.states.get(sensor).state == STATE_UNAVAILABLE
+
+    fake_dtek.houses[HOUSE] = make_house(**works)
+    await refresh(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.address_ok
+    assert hass.states.get(sensor).state == "on"
+    assert bus_events(events) == []
+
+
+async def test_address_outage_start_corrected(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A corrected start of an outage going on is the same outage."""
+    emergency = "Аварійні ремонтні роботи"
+    fake_dtek.houses[HOUSE] = make_house(
+        reason=emergency, start="10:00 18.10.2026", end="14:00 18.10.2026"
+    )
+    await setup_entry(hass, mock_config_entry)
+    events = async_capture_events(hass, EVENT_BUS)
+
+    fake_dtek.houses[HOUSE] = make_house(
+        reason=emergency, start="09:30 18.10.2026", end="14:00 18.10.2026"
+    )
+    await refresh(hass, mock_config_entry)
+    data = mock_config_entry.runtime_data.data
+    assert data.address_history == []
+    assert data.address_outage.start == kyiv(TODAY, "09:30")
+    assert [e["status"] for e in bus_events(events, "address_outage")] == ["updated"]
+
+    # Works of another kind after it are another outage: the first one ends.
+    fake_dtek.houses[HOUSE] = make_house(
+        reason="Планові ремонтні роботи",
+        start="10:00 18.10.2026",
+        end="16:00 18.10.2026",
+    )
+    await refresh(hass, mock_config_entry)
+    history = mock_config_entry.runtime_data.data.address_history
+    assert [(o.start, o.end) for o in history] == [
+        (kyiv(TODAY, "09:30"), kyiv(TODAY, "10:10"))
+    ]
+    assert bus_events(events, "address_outage")[-1]["status"] == "new"
+
+
+@pytest.mark.parametrize("entry_data", [GROUP_ONLY_DATA])
+@pytest.mark.parametrize("options", [{**DEFAULT_OPTIONS, CONF_EXTRA_GROUPS: [OTHER]}])
+async def test_group_only_other_groups_past(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """A group taken out of "Other groups" leaves its calendar with its past."""
+    await setup_entry(hass, mock_config_entry)
+    assert mock_config_entry.runtime_data.data.other_days == {
+        OTHER: {TODAY: slots(("08:00", "12:00"))}
+    }
+
+    frozen_now.move_to(kyiv(TODAY, "13:00"))
+    hass.config_entries.async_update_entry(mock_config_entry, options=DEFAULT_OPTIONS)
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+    data = mock_config_entry.runtime_data.data
+    assert data.extra_groups == []
+    assert data.other_days == {}

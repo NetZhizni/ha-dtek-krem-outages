@@ -98,10 +98,11 @@ async def test_sensor_states(
     assert address.state == "off"
     assert address.attributes["reason"] is None
 
-    device = dr.async_get(hass).async_get_device_by_identifier(
-        (DOMAIN, ENTRY_ID), ENTRY_ID
-    )
-    assert device is not None
+    # Works on the oldest Home Assistant supported too.
+    devices = dr.async_entries_for_config_entry(dr.async_get(hass), ENTRY_ID)
+    assert len(devices) == 1
+    device = devices[0]
+    assert device.identifiers == {(DOMAIN, ENTRY_ID)}
     assert device.name == TITLE
     assert device.entry_type is dr.DeviceEntryType.SERVICE
 
@@ -678,6 +679,41 @@ async def test_other_groups_calendar(
     assert state(hass, "binary_sensor", "scheduled_outage").state == "off"
 
 
+@pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en"}])
+async def test_other_groups_calendar_keeps_the_past(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
+) -> None:
+    """A group DTEK stops listing keeps its past outages in the calendar."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    fake_dtek.days[TOMORROW] = {GROUP: slots(), "GPV4.2": slots(("06:00", "08:00"))}
+    fake_dtek.weekly["GPV4.2"] = {
+        day: slots(possible=(("06:00", "07:00"),)) for day in range(1, 8)
+    }
+    await setup_entry(hass, mock_config_entry)
+    mock_config_entry.runtime_data.update_interval = timedelta(days=1)
+
+    frozen_now.move_to(kyiv(TODAY, "11:00"))
+    fake_dtek.houses[HOUSE] = make_house([GROUP])
+    for _ in range(3):
+        await mock_config_entry.runtime_data.async_refresh()
+    await move_to(hass, frozen_now, kyiv(TODAY, "11:30"))
+
+    # The outage that was going on ends when the group was dropped; nothing
+    # is left ahead, weekly schedule included.
+    events = await calendar_events(hass, "other_groups", days=7)
+    assert [(e["summary"], e["start"], e["end"]) for e in events] == [
+        (
+            "Group 4.2: Power outage",
+            "2026-10-18T08:00:00+03:00",
+            "2026-10-18T11:00:00+03:00",
+        )
+    ]
+    assert state(hass, "calendar", "other_groups").state == "off"
+
+
 @pytest.mark.parametrize("options", [{CONF_LANGUAGE: "en", CONF_GROUPS_MODE: "any"}])
 async def test_combined_calendar(
     hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
@@ -837,3 +873,78 @@ async def test_groups_status_timeline(
     assert status.attributes["today"][0]["start"] == "2026-10-18T00:00:00+03:00"
     assert status.attributes["today"][-1]["end"] == "2026-10-19T00:00:00+03:00"
     assert status.attributes["tomorrow"] is None
+
+
+@pytest.mark.parametrize(
+    ("options", "groups", "expected"),
+    [
+        # The main group alone is the schedule: it being off is no power.
+        (
+            {},
+            [GROUP],
+            ["on", "off", "on", "off", "on"],
+        ),
+        (
+            {},
+            [GROUP, "GPV4.2"],
+            ["on", "on", "off", "off", "on", "off", "on"],
+        ),
+        (
+            {CONF_GROUPS_MODE: "any"},
+            [GROUP, "GPV4.2"],
+            ["on", "off", "off", "off", "on", "off", "on"],
+        ),
+        (
+            {CONF_GROUPS_MODE: "all"},
+            [GROUP, "GPV4.2"],
+            ["on", "maybe", "off", "maybe", "on", "maybe", "on"],
+        ),
+    ],
+)
+async def test_groups_status_power(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    groups: list[str],
+    expected: list[str],
+) -> None:
+    """``power`` of a run follows the schedule the entities show."""
+    fake_dtek.houses[HOUSE] = make_house(groups)
+    fake_dtek.days[TODAY]["GPV4.2"] = slots(("08:00", "13:00"))
+    await setup_entry(hass, mock_config_entry)
+    runs = state(hass, "sensor", "groups_status").attributes["today"]
+    assert [r["power"] for r in runs] == expected
+
+
+async def test_frequent_attributes_not_recorded(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """What changes with every update is left out of the recorder."""
+    await setup_entry(hass, mock_config_entry)
+    for platform, key in (
+        ("binary_sensor", "scheduled_outage"),
+        ("calendar", "outages"),
+        ("sensor", "outages_today"),
+        ("sensor", "groups_status"),
+    ):
+        unrecorded = state(hass, platform, key).state_info["unrecorded_attributes"]
+        assert "last_verified_at" in unrecorded, key
+    connection = state(hass, "sensor", "connection").state_info
+    assert {"last_success", "last_dtek_success"} <= connection["unrecorded_attributes"]
+
+
+async def test_groups_status_power_without_main_day(
+    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+) -> None:
+    """A day the main group has no schedule for has no ``power``."""
+    fake_dtek.houses[HOUSE] = make_house([GROUP, "GPV4.2"])
+    fake_dtek.days[TOMORROW] = {"GPV4.2": slots(("06:00", "08:00"))}
+    await setup_entry(hass, mock_config_entry)
+    status = state(hass, "sensor", "groups_status")
+    assert [r["state"] for r in status.attributes["tomorrow"]] == [
+        "none",
+        "others_all",
+        "none",
+    ]
+    assert {r["power"] for r in status.attributes["tomorrow"]} == {None}
+    assert state(hass, "sensor", "outages_tomorrow").state == "unknown"

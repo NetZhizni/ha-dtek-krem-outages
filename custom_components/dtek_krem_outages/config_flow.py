@@ -492,11 +492,13 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._name = (user_input.get(CONF_NAME) or "").strip() or None
                 if user_input.get(CONF_LANGUAGE) in LANGUAGES:
                     self._language = user_input[CONF_LANGUAGE]
-                groups = self._houses[house].groups
-                if len(groups) == 1:
-                    return await self._async_finish(groups[0], manual=False)
-                self._groups = groups
-                return await self.async_step_group()
+                self._groups = self._houses[house].groups
+                if len(self._groups) != 1:
+                    return await self.async_step_group()
+                # During a stabilization outage DTEK lists its group alone.
+                if self._houses[house].groups_partial:
+                    return await self.async_step_group_outage()
+                return await self._async_finish(self._groups[0], manual=False)
 
         schema: dict[vol.Marker, Any] = {
             vol.Required(
@@ -533,6 +535,30 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 **self._placeholders(),
                 "groups": ", ".join(group_name(g) or g for g in self._groups) or "—",
+            },
+        )
+
+    async def async_step_group_outage(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the group while DTEK lists the group of an outage alone.
+
+        Every group is offered, the listed one first chosen. Keeping it leaves
+        the group to DTEK as if there were no outage; another one is the
+        user's choice and never replaced.
+        """
+        listed = self._groups[0]
+        if user_input is not None and user_input.get(CONF_GROUP) in GROUPS:
+            group = user_input[CONF_GROUP]
+            return await self._async_finish(group, manual=group != listed)
+        return self.async_show_form(
+            step_id="group_outage",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_GROUP, default=listed): _group_select(list(GROUPS))}
+            ),
+            description_placeholders={
+                **self._placeholders(),
+                "groups": group_name(listed) or listed,
             },
         )
 

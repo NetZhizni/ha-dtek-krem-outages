@@ -1,0 +1,5 @@
+# The oldest Home Assistant the integration supports ("homeassistant" in
+# hacs.json): 0.13.269 pins homeassistant==2025.8.0. CI runs it on Python 3.13.
+pytest-homeassistant-custom-component==0.13.269
+# aiodns of that release fails with pycares 5 (no ares_query_a_result).
+pycares<5

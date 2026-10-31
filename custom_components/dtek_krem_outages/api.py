@@ -21,8 +21,12 @@ Facts verified against the live site on 2026-10-18 (samples in tests/fixtures):
   (``"HH:MM dd.mm.YYYY"`` or ``""``), ``type`` (``"2"`` or ``""``),
   ``sub_type_reason`` (groups: usually one, sometimes none or several) and
   ``voluntarily``/``cek`` (always null so far; on other DTEK sites a truthy
-  ``cek`` marks a house served by another operator). Other DTEK sites
-  sometimes give a list of such objects for one house, one per outage. Next
+  ``cek`` marks a house served by another operator). While a stabilization
+  outage is reported for a house of two groups, ``sub_type_reason`` holds the
+  group of that outage alone, from the answer that adds the outage to the one
+  that clears it (11 times from 2026-10-22 to 10-29; emergency outages of the
+  same house left both groups listed): ``House.groups_partial``. Other DTEK
+  sites sometimes give a list of such objects for one house, one per outage. Next
   to ``data`` come the ``show*`` flags the page uses to decide what to show:
   ``showTableFact`` (the schedule for today and tomorrow), ``showTablePlan``
   (the weekly schedule of possible outages; ``false`` on 2026-10-18),
@@ -38,7 +42,8 @@ Facts verified against the live site on 2026-10-18 (samples in tests/fixtures):
   {weekday: {hour: value}}}, "updateFact": ..., ...}`` with ISO weekdays.
   Hour values are described in ``schedule.py``.
 * The mirror (``MIRROR_URL``) republishes ``fact`` and ``preset`` unchanged
-  next to ``lastUpdated`` (ISO, UTC). It has no address data.
+  next to ``lastUpdated`` (ISO, UTC). It has no address data. GitHub serves
+  it with an ``ETag`` and answers ``If-None-Match`` with HTTP 304.
 """
 
 from __future__ import annotations
@@ -176,8 +181,19 @@ def _as_str(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def _isoformat(value: datetime | None) -> str | None:
+def format_iso(value: datetime | None) -> str | None:
+    """Return a datetime in ISO format, None for None."""
     return value.isoformat() if value is not None else None
+
+
+def parse_iso(value: Any) -> datetime | None:
+    """Parse an ISO datetime saved by ``format_iso``; None if it is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt_util.parse_datetime(value)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -201,8 +217,8 @@ class AddressOutage:
         return {
             "reason": self.reason,
             "kind": self.kind,
-            "start": _isoformat(self.start),
-            "end": _isoformat(self.end),
+            "start": format_iso(self.start),
+            "end": format_iso(self.end),
             "type": self.type,
         }
 
@@ -215,19 +231,10 @@ class AddressOutage:
         return cls(
             reason=reason,
             kind=_as_str(data.get("kind")) or classify_reason(reason),
-            start=_parse_iso(data.get("start")),
-            end=_parse_iso(data.get("end")),
+            start=parse_iso(data.get("start")),
+            end=parse_iso(data.get("end")),
             type=_as_str(data.get("type")),
         )
-
-
-def _parse_iso(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        return dt_util.parse_datetime(value)
-    except ValueError:
-        return None
 
 
 def _parse_outage(raw: Mapping[str, Any], tz: tzinfo) -> AddressOutage | None:
@@ -264,13 +271,17 @@ class House:
     outage: AddressOutage | None = None
     # DTEK says another operator serves the house (``cek``).
     external: bool = False
+    # A stabilization outage is reported: DTEK lists the group of that outage
+    # alone then, so other groups of the house may be missing from ``groups``.
+    groups_partial: bool = False
 
     @classmethod
     def from_api(cls, number: str, raw: Any, tz: tzinfo) -> House | None:
         """Build a house from a ``getHomeNum`` item: one record or a list.
 
         A list holds one record per outage; the groups of all of them count
-        and the most severe outage is the one reported.
+        and the most severe outage is the one reported. ``groups_partial``
+        looks at every record, whatever the page shows of the outage.
         """
         records = [raw] if isinstance(raw, Mapping) else raw
         if not isinstance(records, list):
@@ -290,6 +301,7 @@ class House:
             groups=groups,
             outage=_primary_outage(outages),
             external=any(bool(r.get("cek")) for r in records),
+            groups_partial=any(o.kind == OUTAGE_KIND_STABILIZATION for o in outages),
         )
 
 
@@ -512,6 +524,9 @@ class DtekClient:
         self._user_agent = user_agent or build_user_agent()
         self._csrf_token: str | None = None
         self._bootstrap_lock = asyncio.Lock()
+        # The mirror file parsed last time and its ETag, shared by all entries.
+        self._mirror: MirrorData | None = None
+        self._mirror_etag: str | None = None
 
     @property
     def _active_session(self) -> aiohttp.ClientSession:
@@ -577,17 +592,27 @@ class DtekClient:
         )
 
     async def async_get_mirror(self) -> MirrorData:
-        """Return ``fact`` and ``preset`` from the mirror."""
+        """Return ``fact`` and ``preset`` from the mirror.
+
+        The file is asked for with the ETag of the copy parsed last time: an
+        unchanged file is not downloaded again and that copy is returned.
+        """
+        headers = {"User-Agent": self._user_agent}
+        if self._mirror is not None and self._mirror_etag:
+            headers["If-None-Match"] = self._mirror_etag
         try:
             async with self._active_session.get(
                 self._mirror_url,
-                headers={"User-Agent": self._user_agent},
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=API_TIMEOUT),
             ) as response:
+                if response.status == 304 and self._mirror is not None:
+                    return self._mirror
                 if response.status != 200:
                     raise DtekResponseError(
                         f"Unexpected HTTP status {response.status} from the mirror"
                     )
+                etag = response.headers.get("ETag")
                 text = await response.text()
         except TimeoutError as err:
             raise DtekConnectionError("Timeout while requesting the mirror") from err
@@ -599,11 +624,13 @@ class DtekClient:
             raise DtekResponseError("Invalid JSON from the mirror") from err
         if not isinstance(payload, Mapping):
             raise DtekResponseError("Expected an object from the mirror")
-        return MirrorData(
+        self._mirror = MirrorData(
             fact=Fact.from_api(payload.get("fact"), self.tz),
             preset=Preset.from_api(payload.get("preset")),
-            updated_at=_parse_iso(payload.get("lastUpdated")),
+            updated_at=parse_iso(payload.get("lastUpdated")),
         )
+        self._mirror_etag = etag
+        return self._mirror
 
     async def _async_ajax(self, form: Mapping[str, str]) -> Mapping[str, Any]:
         """POST to the ajax endpoint with a CSRF token; retry once on HTTP 400."""

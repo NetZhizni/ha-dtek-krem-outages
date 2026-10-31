@@ -17,9 +17,11 @@ ruff format --check .
 pytest -q
 ```
 
+CI проганяє тести й на найстарішій підтримуваній версії Home Assistant (`requirements_test_min.txt`, Python 3.13).
+
 Правила:
 
-- Код, коментарі, докстрінги й логи — англійською, докстрінги у стилі Google, рядок до 88 символів, `from __future__ import annotations` у кожному модулі. Константи — лише в `const.py`.
+- Код, коментарі, докстрінги й логи — англійською, докстрінги у стилі Google, рядок до 88 символів, `from __future__ import annotations` у кожному модулі. Спільні константи — у `const.py`; ті, що належать одному модулю, лишаються в ньому.
 - Нова поведінка — з тестами в `tests/`. Запити до ДТЕК у тестах ідуть через `FakeDtek` з `tests/conftest.py`, а не в мережу.
 - Тексти UI: `strings.json` і `translations/en.json` однакові, `translations/uk.json` і `translations/ru.json` оновлюються разом з ними (це перевіряє тест).
 - Зміни поведінки описуються в обох README: `README.md` (українська) і `doc/README_en.md` (англійська).
@@ -47,9 +49,11 @@ ruff format --check .
 pytest -q
 ```
 
+CI runs the tests on the oldest Home Assistant supported too (`requirements_test_min.txt`, Python 3.13).
+
 Rules:
 
-- Code, comments, docstrings and logs are in English: Google-style docstrings, 88-character lines, `from __future__ import annotations` in every module. Constants live only in `const.py`.
+- Code, comments, docstrings and logs are in English: Google-style docstrings, 88-character lines, `from __future__ import annotations` in every module. Shared constants live in `const.py`; those of one module stay in it.
 - New behaviour comes with tests in `tests/`. DTEK requests in tests go through `FakeDtek` in `tests/conftest.py`, never to the network.
 - UI texts: `strings.json` and `translations/en.json` are identical, and `translations/uk.json` and `translations/ru.json` are updated with them (a test checks this).
 - Behaviour changes are documented in both READMEs: `README.md` (Ukrainian) and `doc/README_en.md` (English).

@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-31
+
+Two changes break what worked before: the main group no longer changes by itself (Repairs offers the change instead), and the `last_verified_at` attribute is gone.
+
+### Added
+- Repairs: when DTEK lists other groups for the house without the main group of the entry in three answers in a row (about 15 min with a 5 min interval; answers during a stabilization outage don't count), the repair "DTEK lists other groups for …" offers to change the main group to one of them. Its fix flow keeps the past schedule, asks for the whole schedule of the new group at once and fires `group_changed`; the group then counts as chosen by you. The repair goes away by itself once DTEK lists the main group again, and it can be ignored to keep your group. Groups left out in the options are not offered. The answers counted are stored, so the repair is back right after a restart.
+
+### Changed
+- **Breaking:** the main group no longer moves by itself, whether you chose it or it was detected; Repairs offers the change instead. In 0.1.7 a main group detected automatically moved to the group DTEK listed alone in three answers in a row, and stayed there when its own group was listed again.
+- Diagnostics: `main_missing` (answers in a row without the main group) and `group_suggestions` (the groups Repairs offers) instead of `main_candidate`.
+- README (Ukrainian and English): a section on changing the main group in Repairs, also in the configuration steps, the events, the known limitations and the troubleshooting table; the state of `sensor.…_last_update` instead of `last_verified_at`.
+
+### Removed
+- **Breaking:** the `last_verified_at` attribute of the entities computed from the schedule (`sensor.…_groups_status`, `…_next_outage`, `…_outage_end`, `…_outages_today`, `…_outages_tomorrow`, `binary_sensor.…_scheduled_outage` and both calendars). It changed with every update, so every update wrote these entities again: a state change each time, and `state` triggers without `to:` firing every few minutes (0.1.7 only kept it out of the recorder). The same time is the state of `sensor.…_last_update` and the `last_success` attribute of `sensor.…_dtek_connection`; `data_status` stays.
+
 ## [0.1.7] - 2026-10-31
 
 ### Added

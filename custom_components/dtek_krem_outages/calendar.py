@@ -103,7 +103,7 @@ class _DtekCalendar(DtekEntity, CalendarEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return how fresh the schedule is."""
+        """Return whether the schedule is confirmed."""
         return self.coordinator.data.freshness()
 
     @property

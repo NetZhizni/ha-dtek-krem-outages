@@ -114,10 +114,12 @@ DEFAULT_OPTIONS: Final[dict[str, object]] = {
 }
 
 # A group DTEK stops listing for the house is dropped after this many answers
-# in a row without it; a new group is taken at once. A main group detected
-# automatically moves to the group DTEK lists alone after as many answers in a
-# row that list it alone.
+# in a row without it; a new group is taken at once. The main group never
+# moves by itself: after as many answers in a row listing other groups without
+# it, a Repairs issue offers to change it.
 GROUP_REMOVAL_UPDATES: Final = 3
+# Translation key of that issue; its ID is ``group_issue_id(entry_id)``.
+ISSUE_GROUP_NOT_LISTED: Final = "group_not_listed"
 # The ``refresh`` service asks again only this many seconds after the last
 # update, so an automation calling it often doesn't flood DTEK.
 REFRESH_COOLDOWN: Final = 60
@@ -262,6 +264,11 @@ def signal_event(entry_id: str) -> str:
 def storage_key(entry_id: str) -> str:
     """Return the Store key holding the schedule state of an entry."""
     return f"{DOMAIN}.{entry_id}"
+
+
+def group_issue_id(entry_id: str) -> str:
+    """Return the ID of the Repairs issue about the main group of an entry."""
+    return f"{ISSUE_GROUP_NOT_LISTED}_{entry_id}"
 
 
 def warning_thresholds(options: Mapping[str, Any], key: str) -> tuple[int, ...]:

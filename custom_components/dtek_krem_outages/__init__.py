@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv, entity_registry as er
+from homeassistant.helpers import (
+    config_validation as cv,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.helpers.typing import ConfigType
 
 from .api import async_get_client
-from .const import ADDRESS_ENTITIES, DOMAIN
+from .const import ADDRESS_ENTITIES, DOMAIN, group_issue_id
 from .coordinator import DtekConfigEntry, DtekCoordinator, async_remove_store
 from .services import async_setup_services
 
@@ -59,5 +63,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: DtekConfigEntry) -> boo
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: DtekConfigEntry) -> None:
-    """Delete the stored schedule when the entry is removed."""
+    """Delete the stored schedule and the Repairs issue of a removed entry."""
     await async_remove_store(hass, entry.entry_id)
+    ir.async_delete_issue(hass, DOMAIN, group_issue_id(entry.entry_id))

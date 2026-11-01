@@ -246,6 +246,26 @@
       "message": "Updating failed for: {entries}."
     }
   },
+  "issues": {
+    "group_not_listed": {
+      "title": "DTEK lists other groups for {title}",
+      "fix_flow": {
+        "step": {
+          "change": {
+            "title": "Main group of {title}",
+            "description": "For {title}, DTEK has listed {groups} without the main group of the entry, {group}, in several answers in a row. If DTEK moved the house, choose the group to follow: the past schedule stays as it was, and the schedule of the new group is fetched at once. To keep {group}, close this window; the repair can be ignored, and it goes away by itself once DTEK lists {group} again.",
+            "data": {
+              "group": "Main group"
+            }
+          }
+        },
+        "abort": {
+          "entry_not_loaded": "The entry is not loaded. Try again once it is.",
+          "group_listed": "DTEK lists the main group again: nothing to change."
+        }
+      }
+    }
+  },
   "services": {
     "refresh": {
       "name": "Refresh",

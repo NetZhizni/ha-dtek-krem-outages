@@ -91,7 +91,7 @@ Restart Home Assistant afterwards. To switch to a release later, `git fetch --ta
 1. **Settlement**: start typing, e.g. `Бориспіль`. The list is the one DTEK uses (about 1200 settlements).
 2. **Street**: villages without street names have `Без вулиці`. DTEK lists some places under several spellings (`с. Софіївська Борщагівка` and `Софіївська Борщагівка`). The streets of all of them are shown, the ones of another spelling with it in brackets, so the settlement you picked does not matter.
 3. **House**: as DTEK lists it (`43`, `8 а`, `1/2`, ...). Optionally give the entry a short **Name**, e.g. `Home`: entity IDs are built from it (`sensor.home_next_outage`). The examples below assume that name. **Language of entity names**: Ukrainian (default), English or Russian, see the options below.
-4. **Group**: asked only when DTEK lists no group or several groups for the house. Otherwise the group is detected, and if DTEK later moves the house to another group the entry follows it (`group_changed` event). A group you chose yourself is never replaced. With several groups, the one you choose is the main group and the others are followed too, see [Several groups at one address](#several-groups-at-one-address). During a stabilization outage DTEK lists only the group of that outage for the house, so then the integration offers every group with that one chosen: keep it and the group counts as detected by DTEK, choose another and it counts as chosen by you.
+4. **Group**: asked only when DTEK lists no group or several groups for the house. Otherwise the group is detected. It doesn't change by itself afterwards: if DTEK starts listing other groups for the house without it, the integration offers to change it, see [Changing the main group](#changing-the-main-group). With several groups, the one you choose is the main group and the others are followed too, see [Several groups at one address](#several-groups-at-one-address). During a stabilization outage DTEK lists only the group of that outage for the house, so then the integration offers every group with that one chosen.
 
 Each address can be added once; add several entries for several addresses. **⋮ → Reconfigure** changes the address or group.
 
@@ -108,7 +108,7 @@ DTEK sometimes lists several groups for one house, e.g. when its entrances are o
 
 - **A new group** is taken with the next update, with no reconfiguring, and a `groups_changed` event fires. The same goes after updating the integration from a version older than 0.1.5: the groups DTEK already lists are taken with the first request.
 - **A group DTEK no longer lists** is dropped after three answers in a row without it (about 15 min with a 5 min interval), with a `groups_changed` event. If the house is missing from the DTEK answer, its group list is empty or DTEK doesn't answer, nothing is dropped. Its past outages stay in the `…_other_groups` calendar for 7 days, like the past schedule of the main group.
-- **While DTEK reports a stabilization outage for the house**, it lists only the group of that outage. No group is dropped then (one already missing from the answers before included) and the main group doesn't change, while a new group is still taken. Emergency outages and planned works don't shorten the group list.
+- **While DTEK reports a stabilization outage for the house**, it lists only the group of that outage. No group is dropped then (one already missing from the answers before included), such answers don't count for [changing the main group](#changing-the-main-group), while a new group is still taken. Emergency outages and planned works don't shorten the group list.
 - **Where to see them**: the `calendar.…_other_groups` calendar (every event named with its group, e.g. `Group 4.2: Power outage`), the `extra_groups` attribute of `sensor.…_group` and `groups` in the `get_schedule` response.
 - **Schedule mode**: the "Other groups of the address in the schedule" option tells what all entities, events, warnings and the `…_outages` calendar follow:
   - **Main group only** (default): the other groups are only in the `…_other_groups` calendar;
@@ -133,7 +133,17 @@ How to set it up:
 
 When you don't know which line feeds your flat, the third mode suits: the `…_outages` calendar shows "Power outage" where all groups are off and "Possible outage" where some are, with the groups named in the event description; `outage_warning` comes before an outage of all groups, `possible_outage_warning` before a possible one.
 
-A main group detected automatically moves to another group when DTEK lists only that other group for the house in three answers in a row (about 15 min with a 5 min interval), and never during a stabilization outage. One you chose yourself, from several groups for example, is never replaced. The `manual` attribute of `sensor.…_group` tells which it is; **⋮ → Reconfigure** changes it. An entry without an address doesn't know the groups of the house: its other groups are chosen in the "Other groups" option.
+An entry without an address doesn't know the groups of the house: its other groups are chosen in the "Other groups" option.
+
+### Changing the main group
+
+The main group doesn't change by itself, whether it was detected or you chose it. When DTEK lists groups for the house without the main one in three answers in a row (about 15 min with a 5 min interval), **Settings → System → Repairs** gets the repair "DTEK lists other groups for …". Answers during a stabilization outage don't count.
+
+- **Repair**: choose one of the groups DTEK lists (groups in "Leave out groups" are not offered). The past schedule stays, the schedule of the new group is fetched at once, a `group_changed` event fires, and the group counts as chosen by you from then on (`manual: true`).
+- **Ignore**: the main group stays, and the other groups are still followed.
+- Once DTEK lists the main group again, the repair goes away by itself. After a restart of Home Assistant it is back at once, without waiting for new answers.
+
+**⋮ → Reconfigure** changes the main group at any time too. The `manual` attribute of `sensor.…_group` tells how it was set.
 
 ### Options
 
@@ -157,7 +167,7 @@ Each entry creates one device:
 
 | Entity | State |
 |---|---|
-| `sensor.…_group` | Main group, e.g. `3.1`. Attributes: `group_id` (`GPV3.1`), `groups_at_address`, `extra_groups` (the other groups followed), `groups_mode` (`main` / `any` / `all`; the mode in effect, so `main` while there are no other groups), `manual`, the address, `external_operator` |
+| `sensor.…_group` | Main group, e.g. `3.1`. Attributes: `group_id` (`GPV3.1`), `groups_at_address`, `extra_groups` (the other groups followed), `groups_mode` (`main` / `any` / `all`; the mode in effect, so `main` while there are no other groups), `manual` (`true` when you chose the group: while setting up or in Repairs), the address, `external_operator` |
 | `sensor.…_groups_status` | Which groups of the address are off now, each by its own schedule: `none`, `main` (the main group only), `main_some` / `main_all` (the main and some / all other groups), `others_some` / `others_all` (only some / all other groups). Attributes: `groups_off`, `main_group`, `extra_groups`, `level` (a number 0–5: `none`, `others_some`, `others_all`, `main`, `main_some`, `main_all`), `today` and `tomorrow` — the whole day as runs `{start, end, state, level, groups, power}` (`null` until the day has a schedule). `power` is `on`, `off` or `maybe` by the schedule the entities follow, that is, by the "Other groups of the address in the schedule" option (`null` if that schedule has no such day) |
 | `sensor.…_next_outage` | Start of the next scheduled outage (timestamp). Attributes: `end`, `duration_minutes` |
 | `sensor.…_outage_end` | End of the outage in progress; `unknown` when there is none |
@@ -176,10 +186,7 @@ Each entry creates one device:
 
 An entry without an address has no `address_status`, `estimated_restoration` and `address_outage`.
 
-The entities computed from the schedule (`groups_status`, `next_outage`, `outage_end`, `outages_today`, `outages_tomorrow`, `scheduled_outage`, the calendars) have two more attributes:
-
-- `data_status`: `current` when the last update got the schedule from DTEK or the mirror, `stale` when no source answered and the entities work on what is stored;
-- `last_verified_at`: when a source last confirmed the schedule. It changes with every update, so it is not written to the history (recorder). A `state` trigger without `to:` or `attribute:` on these entities fires on this change too, that is, with every update.
+The entities computed from the schedule (`groups_status`, `next_outage`, `outage_end`, `outages_today`, `outages_tomorrow`, `scheduled_outage`, the calendars) have one more attribute, `data_status`: `current` when the last update got the schedule from DTEK or the mirror, `stale` when no source answered and the entities work on what is stored. When a source last confirmed the schedule is the state of `sensor.…_last_update` (and `last_success` of `sensor.…_dtek_connection`). These entities have no attribute that would change with every update, so an update without news doesn't write them again.
 
 All times are Kyiv time. Sensors switch at the exact moment an outage starts or ends and at midnight, not only on updates.
 
@@ -215,7 +222,7 @@ Every event has `type`, `group` (`GPV3.1`), `group_name` (`3.1`), `settlement`, 
 | `outage_started` | A scheduled outage starts | `start`, `end`, `duration_minutes`, `groups` |
 | `outage_ended` | A scheduled outage ends | `start`, `end`, `duration_minutes`, `groups`, `next_start`, `next_end` |
 | `address_outage` | DTEK reports an outage for the house, changes its start or end, or clears it | `status` (`new` / `updated` / `cleared`), `reason`, `kind` (`stabilization` / `emergency` / `planned` / `other`), `start`, `end`, `previous_end` |
-| `group_changed` | DTEK moved the house to another group (it lists only that group for the house in three answers in a row) | `previous_group`, `previous_group_name` |
+| `group_changed` | The main group was changed in Repairs, see [Changing the main group](#changing-the-main-group) | `previous_group`, `previous_group_name` |
 | `groups_changed` | DTEK added a group for the house or no longer lists one | `added`, `removed`, `extra_groups` (group names, e.g. `["4.2"]`) |
 
 Rules:
@@ -507,18 +514,20 @@ The marks are on the second line of the template; `'🟡', '🔶', '⚫'` work t
 | The schedule suddenly says "no outages" | If `daily_schedule_shown` is `false`, DTEK hid the schedule on its website; the integration shows it again as soon as it is back |
 | `external_operator: true` | DTEK says another operator serves the house, and its schedule may not apply to the address |
 | The "Other groups" calendar or the combined schedule has a group that isn't yours | Tick it in the "Leave out groups" option |
+| Repairs has "DTEK lists other groups for …" | DTEK hasn't listed the main group for the house in several answers in a row. If it really moved the house, choose **Repair** and the new group; if your group is still the same, ignore the repair, see [Changing the main group](#changing-the-main-group) |
 | A card from the examples doesn't show the works at the address or part of the data | Check the entity IDs in the card against **Settings → Devices & services → Entities**. When the device is in an area, the entities added by updates of the integration have IDs that start with the area name (`sensor.kitchen_home_address_status`) |
 
 ## Diagnostics
 
-**Devices & services → DTEK KREM Outages → ⋮ → Download diagnostics**. The street and house number are redacted; the settlement, group and schedule stay, and so do the counters of the groups (how many answers in a row a group was missing or DTEK listed only another one) and the past of the other groups.
+**Devices & services → DTEK KREM Outages → ⋮ → Download diagnostics**. The street and house number are redacted; the settlement, group and schedule stay, and so do the counters of the groups (how many answers in a row another group or the main one was missing) and the past of the other groups.
 
 ## Known limitations
 
 - The integration depends on the DTEK website. If DTEK changes the endpoint or puts it behind the anti-bot challenge too, the schedule still comes from the mirror, but the address data (group detection, `address_outage`) stops until the integration is updated.
 - The mirror updates about every 5 minutes and can lag behind DTEK.
 - The schedule has half-hour precision, like on the DTEK website. On DST change days the missing or repeated hour follows the wall clock.
-- During a stabilization outage DTEK lists only the group of that outage for the house. The integration then drops no group and keeps the main one, so it takes a real change of the groups only after the outage ends. A main group detected automatically moves to another one three answers (about 15 min) late.
+- During a stabilization outage DTEK lists only the group of that outage for the house. The integration then drops no group and doesn't count such answers for changing the main one, so it notices a real change of the groups only after the outage ends.
+- The main group doesn't change by itself. If DTEK really moves the house to another group, the entities follow the old one until you change it in Repairs (the repair comes after about 15 min).
 - Each address can be added only once, so the other groups of a house are followed in the same entry, not as entries of their own. The other groups have no sensors of their own: they are in the `…_other_groups` calendar, the attributes and `get_schedule`, and the "Other groups of the address in the schedule" option turns the sensors to all groups.
 - In the "any group" mode the schedule takes the worst of all groups. If your flat is fed by one line, it shows the outages of the other lines too.
 - Only DTEK KREM (Kyiv region). Kyiv city is served by DTEK KEM / Yasno, which this integration does not cover.
@@ -561,7 +570,7 @@ Version 0.1.3 brought over ideas (not code) from both projects:
   - the DTEK page flags: a hidden daily or weekly schedule is not shown;
   - a house DTEK lists as several records, one per outage;
   - the other operator mark (`external_operator`);
-  - the DTEK connection sensor and the `data_status` / `last_verified_at` attributes;
+  - the DTEK connection sensor and the `data_status` attribute (and `last_verified_at` before 0.2.0);
   - a longer interval after failures, with random jitter;
   - separate sensors for the address status and the estimated restoration;
   - the groups of the house besides the chosen one, with the group named in every calendar event (in version 0.1.5);

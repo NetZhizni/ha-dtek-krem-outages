@@ -156,7 +156,8 @@ async def test_diagnostics(
     coordinator = result["coordinator"]
     assert coordinator["group_manual"] is False
     assert coordinator["missing_groups"] == {}
-    assert coordinator["main_candidate"] is None
+    assert coordinator["main_missing"] == 0
+    assert coordinator["group_suggestions"] == []
     assert coordinator["full_fact_needed"] is False
     assert coordinator["other_days"] == {}
 
@@ -172,7 +173,8 @@ async def test_diagnostics_of_groups(
     result = await async_get_config_entry_diagnostics(hass, mock_config_entry)
     coordinator = result["coordinator"]
     assert coordinator["missing_groups"] == {}
-    assert coordinator["main_candidate"] == {"group": "GPV4.2", "answers": 1}
+    assert coordinator["main_missing"] == 1
+    assert coordinator["group_suggestions"] == []
     assert coordinator["other_days"] == {
         "GPV4.2": {TODAY.isoformat(): slots(("08:00", "12:00"))}
     }

@@ -24,7 +24,7 @@ from custom_components.dtek_krem_outages.const import (
     DOMAIN,
     EVENT_BUS,
 )
-from homeassistant.const import ATTR_ATTRIBUTION, ATTR_ENTITY_ID
+from homeassistant.const import ATTR_ATTRIBUTION, ATTR_ENTITY_ID, EVENT_STATE_CHANGED
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.util import dt as dt_util
@@ -33,6 +33,7 @@ from .conftest import (
     ENTRY_ID,
     GROUP,
     HOUSE,
+    NOW,
     TITLE,
     TODAY,
     TOMORROW,
@@ -544,7 +545,10 @@ async def test_connection_and_freshness(
     ):
         attributes = state(hass, platform, key).attributes
         assert attributes["data_status"] == "current", key
-        assert attributes["last_verified_at"] == "2026-10-18T07:10:00+00:00", key
+        # When the schedule was confirmed last is the last update sensor.
+        assert "last_verified_at" not in attributes, key
+    last_update = state(hass, "sensor", "last_update")
+    assert dt_util.parse_datetime(last_update.state) == NOW
 
     fake_dtek.ajax_error = TimeoutError()
     fake_dtek.mirror_error = TimeoutError()
@@ -916,19 +920,24 @@ async def test_groups_status_power(
     assert [r["power"] for r in runs] == expected
 
 
-async def test_frequent_attributes_not_recorded(
-    hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
+async def test_update_without_news_writes_nothing(
+    hass: HomeAssistant,
+    fake_dtek: FakeDtek,
+    mock_config_entry: MockConfigEntry,
+    frozen_now: FrozenDateTimeFactory,
 ) -> None:
-    """What changes with every update is left out of the recorder."""
+    """Only the diagnostic sensors change when an update brings no news."""
     await setup_entry(hass, mock_config_entry)
-    for platform, key in (
-        ("binary_sensor", "scheduled_outage"),
-        ("calendar", "outages"),
-        ("sensor", "outages_today"),
-        ("sensor", "groups_status"),
-    ):
-        unrecorded = state(hass, platform, key).state_info["unrecorded_attributes"]
-        assert "last_verified_at" in unrecorded, key
+    changes = async_capture_events(hass, EVENT_STATE_CHANGED)
+    frozen_now.tick(timedelta(minutes=5))
+    await mock_config_entry.runtime_data.async_refresh()
+    await hass.async_block_till_done()
+    changed = {e.data["entity_id"] for e in changes}
+    assert changed == {
+        get_entity_id(hass, "sensor", "last_update"),
+        get_entity_id(hass, "sensor", "connection"),
+    }
+    # The connection sensor changes with every update: left out of history.
     connection = state(hass, "sensor", "connection").state_info
     assert {"last_success", "last_dtek_success"} <= connection["unrecorded_attributes"]
 

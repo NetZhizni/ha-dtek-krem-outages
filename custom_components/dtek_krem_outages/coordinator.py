@@ -20,10 +20,10 @@ entry; the others are followed too, each with its own merged schedule. They
 come and go with the DTEK answer: a new group is taken at once, a group that
 is no longer listed is dropped after a few answers without it. While DTEK
 reports a stabilization outage for the house it lists the group of that
-outage only, so then no group is dropped. A main group detected
-automatically moves to the group DTEK lists alone after a few answers in a
-row that do so, never during such an outage; one the user chose never moves.
-The schedule the entities show follows ``groups_mode``: the main group
+outage only, so then no group is dropped. The main group never moves by
+itself: when DTEK lists other groups for the house without it in a few
+answers in a row (not counting such an outage), a Repairs issue offers to
+change it. The schedule the entities show follows ``groups_mode``: the main group
 alone, the worst of all groups slot by slot, or an outage where all groups
 are off and a possible outage where some are. It is merged like a schedule
 from DTEK, and so is what the calendar of the other groups shows: a dropped
@@ -47,6 +47,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_utc_time
 from homeassistant.helpers.start import async_at_started
@@ -113,6 +114,7 @@ from .const import (
     GROUPS_MODE_MAIN,
     GROUPS_MODES,
     HISTORY_DAYS,
+    ISSUE_GROUP_NOT_LISTED,
     LANGUAGES,
     MIN_UPDATE_INTERVAL,
     REFRESH_COOLDOWN,
@@ -123,6 +125,7 @@ from .const import (
     SOURCE_STORAGE,
     STORAGE_SAVE_DELAY,
     STORAGE_VERSION,
+    group_issue_id,
     group_name,
     signal_event,
     storage_key,
@@ -279,11 +282,12 @@ class DtekData:
         return DATA_CURRENT if self.fetch_ok else DATA_STALE
 
     def freshness(self) -> dict[str, Any]:
-        """Return the attributes telling how fresh the schedule is."""
-        return {
-            "data_status": self.data_status,
-            "last_verified_at": format_iso(self.last_success),
-        }
+        """Return the attribute telling whether the schedule is confirmed.
+
+        When it was confirmed last is the state of the last update sensor: an
+        attribute changing with every update would write the entities again.
+        """
+        return {"data_status": self.data_status}
 
     def current_outage(self, now: datetime) -> Interval | None:
         """Return the scheduled outage in progress."""
@@ -357,9 +361,9 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         )
         # Answers in a row without a followed group, until it is dropped.
         self._missing_groups: dict[str, int] = {}
-        # The group DTEK lists alone instead of the main one and the answers in
-        # a row that did so, until the main group moves to it.
-        self._main_candidate: tuple[str, int] | None = None
+        # Answers in a row that listed groups for the house without the main
+        # one; from GROUP_REMOVAL_UPDATES on a Repairs issue offers the change.
+        self._main_missing = 0
         # Each followed group alone; a group without a key has no schedule yet.
         self._group_days: dict[str, dict[date, str]] = {}
         self._group_presets: dict[str, dict[int, str]] = {}
@@ -452,8 +456,14 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         update quietly fetches the schedule of the current group. A Store
         saved before other groups were followed holds the main group only.
         The calendar of the other groups leaves out the groups the options
-        leave out, past included.
+        leave out, past included. The Repairs issue about the main group
+        follows what was stored, so it is back at once after a restart.
         """
+        await self._async_load_store()
+        self._update_group_issue()
+
+    async def _async_load_store(self) -> None:
+        """Take the stored state that still applies to the entry."""
         stored = await self._store.async_load()
         if not isinstance(stored, Mapping) or stored.get("address") != self.address_key:
             return
@@ -490,6 +500,8 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._address_outage = AddressOutage.from_dict(stored.get("address_outage"))
         groups = stored.get("groups_at_address")
         self._groups_at_address = list(groups) if isinstance(groups, list) else []
+        missing = stored.get("main_missing")
+        self._main_missing = missing if isinstance(missing, int) else 0
         warned = stored.get("warned")
         self._warned = {w for w in warned if isinstance(w, str)} if warned else set()
 
@@ -555,6 +567,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
             else None,
             "address_history": [o.as_dict() for o in self._address_history],
             "groups_at_address": self._groups_at_address,
+            "main_missing": self._main_missing,
             "external_operator": self._external_operator,
             "publication": self._publication.as_dict(),
             "warned": sorted(self._warned),
@@ -925,7 +938,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         self._groups_at_address = list(groups)
 
         previous_main, previous_extra = self.group, list(self._extra_groups)
-        self._follow_main_group(groups, partial=house.groups_partial)
+        self._track_main_group(house.groups, partial=house.groups_partial)
         self._follow_extra_groups(groups)
         followed = self.followed_groups
         self._group_days = {g: d for g, d in self._group_days.items() if g in followed}
@@ -982,37 +995,84 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         }
         self._extra_groups = _ordered_groups([*listed, *kept], {self.group})
 
-    def _follow_main_group(self, groups: list[str], *, partial: bool) -> None:
-        """Move to the group DTEK lists alone, after a few answers in a row.
+    def _track_main_group(self, groups: list[str], *, partial: bool) -> None:
+        """Count the answers that list groups for the house without the main one.
 
-        GROUP_REMOVAL_UPDATES answers in a row must list the same other group
-        alone, so a passing glitch moves nothing. The short list given during
-        a stabilization outage doesn't count and breaks the row. A group
-        chosen by the user is never replaced.
+        The main group never moves by itself, a passing glitch or the short
+        list of a stabilization outage included: after GROUP_REMOVAL_UPDATES
+        such answers in a row a Repairs issue offers the groups DTEK lists,
+        and the user decides. Such an outage doesn't count, and the issue goes
+        away as soon as DTEK lists the main group again.
         """
-        candidate = groups[0] if len(groups) == 1 and not partial else None
-        if self.group_manual or candidate is None or candidate == self.group:
-            self._main_candidate = None
+        if self.group in groups:
+            self._main_missing = 0
+        elif not partial:
+            self._main_missing += 1
+        self._update_group_issue()
+
+    def group_suggestions(self) -> list[str]:
+        """Return the groups the Repairs issue offers instead of the main one.
+
+        Empty until DTEK has listed groups for the house without the main one
+        GROUP_REMOVAL_UPDATES answers in a row. The groups the options leave
+        out are not offered.
+        """
+        if self._main_missing < GROUP_REMOVAL_UPDATES:
+            return []
+        return _ordered_groups(
+            self._groups_at_address, {self.group, *self.excluded_groups}
+        )
+
+    def group_issue_placeholders(self) -> dict[str, str]:
+        """Return the placeholders of the Repairs issue and its fix flow."""
+        return {
+            "title": self.config_entry.title,
+            "group": group_name(self.group) or self.group,
+            "groups": ", ".join(group_name(g) or g for g in self.group_suggestions()),
+        }
+
+    @callback
+    def _update_group_issue(self) -> None:
+        """Create, update or delete the Repairs issue about the main group."""
+        issue_id = group_issue_id(self.config_entry.entry_id)
+        if not self.group_suggestions():
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
-        seen = self._main_candidate
-        answers = seen[1] + 1 if seen is not None and seen[0] == candidate else 1
-        if answers < GROUP_REMOVAL_UPDATES:
-            self._main_candidate = (candidate, answers)
-            return
-        self._main_candidate = None
-        previous, self.group = self.group, candidate
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            data={"entry_id": self.config_entry.entry_id},
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_GROUP_NOT_LISTED,
+            translation_placeholders=self.group_issue_placeholders(),
+        )
+
+    async def async_change_group(self, group: str) -> None:
+        """Make ``group`` the main group, as the user chose in Repairs.
+
+        Today keeps its past, the days ahead belonged to the old group: the
+        whole schedule is asked for at once. The group counts as chosen by
+        the user.
+        """
+        self._cancel_timer()
+        previous, self.group = self.group, group
+        self.group_manual = True
+        self._main_missing = 0
         _LOGGER.info(
-            "%s: DTEK moved the address from group %s to %s",
+            "%s: main group changed from %s to %s",
             self.config_entry.title,
             previous,
-            self.group,
+            group,
         )
         self.hass.config_entries.async_update_entry(
-            self.config_entry, data={**self.config_entry.data, CONF_GROUP: self.group}
+            self.config_entry,
+            data={**self.config_entry.data, CONF_GROUP: group, CONF_GROUP_MANUAL: True},
         )
-        # Today keeps its past; the days ahead belonged to the old group.
         today, _ = slot_at(dt_util.utcnow(), self.tz)
         self._days = {day: s for day, s in self._days.items() if day <= today}
+        self._extra_groups = [g for g in self._extra_groups if g != group]
         self._fact_update = None
         self._fact_updated_at = None
         self._preset_update = None
@@ -1025,6 +1085,7 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
                     "previous_group_name": group_name(previous),
                 },
             )
+        await self.async_refresh()
 
     def _update_address_outage(
         self, outage: AddressOutage | None, now: datetime
@@ -1451,12 +1512,8 @@ class DtekCoordinator(DataUpdateCoordinator[DtekData]):
         return {
             "group_manual": self.group_manual,
             "missing_groups": dict(self._missing_groups),
-            "main_candidate": {
-                "group": self._main_candidate[0],
-                "answers": self._main_candidate[1],
-            }
-            if self._main_candidate
-            else None,
+            "main_missing": self._main_missing,
+            "group_suggestions": self.group_suggestions(),
             "full_fact_needed": self._full_fact_needed,
             "fact_update": self._fact_update,
             "preset_update": self._preset_update,

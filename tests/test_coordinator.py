@@ -381,40 +381,24 @@ async def test_store_of_another_group_keeps_history_only(
     assert TOMORROW not in days
 
 
-async def test_group_change_by_dtek(
+async def test_main_group_never_moves_by_itself(
     hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
 ) -> None:
-    """When DTEK moves the house to another group, the entry follows."""
+    """Another group listed alone is followed besides the main one, no more."""
     await setup_entry(hass, mock_config_entry)
     events = async_capture_events(hass, EVENT_BUS)
 
-    # The new group alone is followed besides the main one for two answers.
     fake_dtek.houses[HOUSE] = make_house(["GPV4.2"])
-    for _ in range(GROUP_REMOVAL_UPDATES - 1):
+    for _ in range(GROUP_REMOVAL_UPDATES + 2):
         await refresh(hass, mock_config_entry)
-    assert mock_config_entry.runtime_data.data.group == GROUP
-    assert mock_config_entry.runtime_data.data.extra_groups == ["GPV4.2"]
-    assert bus_events(events, "group_changed") == []
-    events.clear()
-
-    # The third answer in a row moves the main group.
-    await refresh(hass, mock_config_entry)
-    assert mock_config_entry.data[CONF_GROUP] == "GPV4.2"
     data = mock_config_entry.runtime_data.data
-    assert data.group == "GPV4.2"
-    # Finished slots of today keep the old group, the rest is the new group.
-    assert data.days[TODAY] == slots(("10:00", "12:00"))
-    types = [e["type"] for e in bus_events(events)]
-    assert types[0] == "group_changed"
-    assert "schedule_changed" in types
-    # The main group moving out of the other groups is no news.
-    assert "groups_changed" not in types
-    changed = bus_events(events, "group_changed")[0]
-    assert changed["previous_group"] == GROUP
-    assert changed["group"] == "GPV4.2"
-    assert changed["group_name"] == "4.2"
-    # The second request forced the schedule of the new group.
-    assert fake_dtek.schedule_forms[-1]["data[2][value]"] == FORCE_UPDATE_FACT
+    assert data.group == GROUP
+    assert mock_config_entry.data[CONF_GROUP] == GROUP
+    assert data.extra_groups == ["GPV4.2"]
+    assert data.days[TODAY] == slots(("12:00", "14:00"), ("18:00", "20:30"))
+    # Repairs offers the change instead.
+    assert mock_config_entry.runtime_data.group_suggestions() == ["GPV4.2"]
+    assert bus_events(events, "group_changed") == []
 
 
 async def test_manual_group_is_kept(
@@ -921,12 +905,13 @@ async def test_main_group_kept_during_outage(
     assert data.extra_groups == [OTHER]
     assert bus_events(events, "group_changed") == []
 
-    # Listed alone without an outage, it is the group of the house.
+    # Listed alone without an outage, it is offered in Repairs; nothing moves.
     fake_dtek.houses[HOUSE] = make_house([OTHER])
     for _ in range(GROUP_REMOVAL_UPDATES):
         await refresh(hass, mock_config_entry)
-    assert mock_config_entry.runtime_data.data.group == OTHER
-    assert len(bus_events(events, "group_changed")) == 1
+    assert mock_config_entry.runtime_data.data.group == GROUP
+    assert mock_config_entry.runtime_data.group_suggestions() == [OTHER]
+    assert bus_events(events, "group_changed") == []
 
 
 async def test_dropped_group_keeps_its_past(
@@ -1087,11 +1072,16 @@ async def test_main_group_moves_to_other_group(
     await setup_entry(hass, mock_config_entry)
     events = async_capture_events(hass, EVENT_BUS)
 
+    # As the fix flow of Repairs does it.
     fake_dtek.houses[HOUSE] = make_house([OTHER])
-    for _ in range(GROUP_REMOVAL_UPDATES):
-        await refresh(hass, mock_config_entry)
+    await mock_config_entry.runtime_data.async_change_group(OTHER)
+    await hass.async_block_till_done()
     data = mock_config_entry.runtime_data.data
     assert data.group == OTHER
+    assert mock_config_entry.data[CONF_GROUP] == OTHER
+    assert mock_config_entry.data["group_manual"] is True
+    # The whole schedule of the new group is asked for at once.
+    assert fake_dtek.schedule_forms[-1]["data[2][value]"] == FORCE_UPDATE_FACT
     assert data.extra_groups == []
     assert set(data.group_days) == {OTHER}
     assert data.days[TODAY] == slots(("10:00", "12:00"))
@@ -1314,6 +1304,7 @@ async def test_short_list_after_the_outage(
     assert bus_events(events, "group_changed") == []
     assert bus_events(events, "outage_started") == []
     assert bus_events(events, "groups_changed") == []
+    assert mock_config_entry.runtime_data.group_suggestions() == []
 
 
 async def test_short_list_with_nothing_known(
@@ -1330,6 +1321,8 @@ async def test_short_list_with_nothing_known(
     assert data.group == GROUP
     assert data.extra_groups == [OTHER]
     assert bus_events(events, "group_changed") == []
+    # The short list of a stabilization outage is not offered either.
+    assert mock_config_entry.runtime_data.group_suggestions() == []
 
 
 async def test_other_outages_list_groups_fully(
@@ -1356,22 +1349,21 @@ async def test_other_outages_list_groups_fully(
 async def test_main_group_glitch(
     hass: HomeAssistant, fake_dtek: FakeDtek, mock_config_entry: MockConfigEntry
 ) -> None:
-    """Answers that list another group alone must come in a row."""
+    """Answers without the main group must come in a row to be offered."""
     await setup_entry(hass, mock_config_entry)
-    events = async_capture_events(hass, EVENT_BUS)
+    coordinator = mock_config_entry.runtime_data
     for houses in ([OTHER], [OTHER], [GROUP], [OTHER], [OTHER], []):
         fake_dtek.houses[HOUSE] = make_house(houses)
         await refresh(hass, mock_config_entry)
     # A missing house or an empty list doesn't break the row: no news.
     del fake_dtek.houses[HOUSE]
     await refresh(hass, mock_config_entry)
-    assert mock_config_entry.runtime_data.data.group == GROUP
-    assert bus_events(events, "group_changed") == []
+    assert coordinator.group_suggestions() == []
 
     fake_dtek.houses[HOUSE] = make_house([OTHER])
     await refresh(hass, mock_config_entry)
-    assert mock_config_entry.runtime_data.data.group == OTHER
-    assert len(bus_events(events, "group_changed")) == 1
+    assert coordinator.group_suggestions() == [OTHER]
+    assert coordinator.data.group == GROUP
 
 
 async def test_missing_house_keeps_the_outage(

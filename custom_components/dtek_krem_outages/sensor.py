@@ -266,7 +266,7 @@ class DtekSensorDescription(SensorEntityDescription):
     attributes_fn: Callable[[DtekCoordinator, datetime], dict[str, Any] | None] = (
         lambda coordinator, now: None
     )
-    # Computed from the schedule: add ``data_status`` and ``last_verified_at``.
+    # Computed from the schedule: add ``data_status``.
     freshness: bool = False
     # Needs the address; unavailable while DTEK can't be reached.
     address: bool = False
@@ -400,10 +400,10 @@ class DtekSensor(DtekEntity, SensorEntity):
 
     entity_description: DtekSensorDescription
     # The whole-day timelines of the groups status change with the schedule
-    # and are there for charts, not for history. The last successes (of the
-    # connection sensor too) change with every update.
+    # and are there for charts, not for history. The last successes of the
+    # connection sensor change with every update.
     _unrecorded_attributes = frozenset(
-        {"today", "tomorrow", "last_verified_at", "last_success", "last_dtek_success"}
+        {"today", "tomorrow", "last_success", "last_dtek_success"}
     )
 
     def __init__(

@@ -252,8 +252,11 @@ def _warning_select(options: Mapping[str, Any], key: str) -> SelectSelector:
     )
 
 
-def _group_select(choices: list[str], *, multiple: bool = False) -> SelectSelector:
-    """A dropdown of groups labelled like people say them: ``3.1``."""
+def group_select(choices: list[str], *, multiple: bool = False) -> SelectSelector:
+    """A dropdown of groups labelled like people say them: ``3.1``.
+
+    The Repairs flow of the main group uses it too.
+    """
     return SelectSelector(
         SelectSelectorConfig(
             options=[
@@ -318,11 +321,11 @@ def _options_schema(
         vol.Required(
             CONF_EXCLUDED_GROUPS,
             default=_known_groups(values[CONF_EXCLUDED_GROUPS]),
-        ): _group_select(list(GROUPS), multiple=True),
+        ): group_select(list(GROUPS), multiple=True),
         vol.Required(
             CONF_EXTRA_GROUPS,
             default=_known_groups(values[CONF_EXTRA_GROUPS], group),
-        ): _group_select(others, multiple=True),
+        ): group_select(others, multiple=True),
         vol.Required(CONF_LANGUAGE, default=values[CONF_LANGUAGE]): vol.All(
             _language_select(), vol.In(LANGUAGES)
         ),
@@ -530,7 +533,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="group",
             data_schema=vol.Schema(
-                {vol.Required(CONF_GROUP, default=choices[0]): _group_select(choices)}
+                {vol.Required(CONF_GROUP, default=choices[0]): group_select(choices)}
             ),
             description_placeholders={
                 **self._placeholders(),
@@ -543,9 +546,9 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Choose the group while DTEK lists the group of an outage alone.
 
-        Every group is offered, the listed one first chosen. Keeping it leaves
-        the group to DTEK as if there were no outage; another one is the
-        user's choice and never replaced.
+        Every group is offered, the listed one first chosen. Keeping it counts
+        as detected, as if there were no outage; another one as the choice of
+        the user (``group_manual``).
         """
         listed = self._groups[0]
         if user_input is not None and user_input.get(CONF_GROUP) in GROUPS:
@@ -554,7 +557,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="group_outage",
             data_schema=vol.Schema(
-                {vol.Required(CONF_GROUP, default=listed): _group_select(list(GROUPS))}
+                {vol.Required(CONF_GROUP, default=listed): group_select(list(GROUPS))}
             ),
             description_placeholders={
                 **self._placeholders(),
@@ -584,7 +587,7 @@ class DtekKremConfigFlow(ConfigFlow, domain=DOMAIN):
         schema: dict[vol.Marker, Any] = {
             vol.Required(
                 CONF_GROUP, default=current if current in GROUPS else GROUPS[0]
-            ): _group_select(list(GROUPS)),
+            ): group_select(list(GROUPS)),
             vol.Optional(
                 CONF_NAME, description={"suggested_value": self._name}
             ): TextSelector(),
